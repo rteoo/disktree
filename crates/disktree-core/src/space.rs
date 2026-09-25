@@ -218,15 +218,43 @@ pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
 /// macOS does not have `/proc/self/mounts`; parse its native mount table.
 #[cfg(target_os = "macos")]
 pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
-    Some(
-        macos_mounts()?
-            .into_iter()
-            .filter(|mount| {
-                mount.point != root && mount.point.starts_with(root)
-            })
-            .map(|mount| mount.point)
-            .collect(),
-    )
+    let mounts = macos_mounts()?;
+    let own = macos_mount_for(root)?;
+    let mut foreign: Vec<PathBuf> = mounts
+        .iter()
+        .filter(|mount| {
+            mount.point != root && mount.point.starts_with(root)
+        })
+        .map(|mount| mount.point.clone())
+        .collect();
+    if mounts.iter().any(|mount| {
+        mount.point == Path::new("/System/Volumes/Data")
+            && mount.source != own.source
+    }) {
+        // APFS firmlinks expose Data directories under System paths without
+        // changing st_dev or appearing as mount points at those paths.
+        let table = std::fs::read_to_string("/usr/share/firmlinks").ok()?;
+        foreign.extend(
+            parse_macos_firmlinks(&table)?
+                .into_iter()
+                .filter(|point| point != root && point.starts_with(root)),
+        );
+    }
+    Some(foreign)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_firmlinks(table: &str) -> Option<Vec<PathBuf>> {
+    let mut points = Vec::new();
+    for line in table.lines().filter(|line| !line.is_empty()) {
+        let (source, target) = line.split_once('\t')?;
+        let path = Path::new(source);
+        if !path.is_absolute() || path == Path::new("/") || target.is_empty() {
+            return None;
+        }
+        points.push(path.to_path_buf());
+    }
+    (!points.is_empty()).then_some(points)
 }
 
 /// Mount paths used by the macOS removal guard, including APFS volumes that
@@ -328,6 +356,30 @@ mod tests {
         let line = "/dev/disk3s5 478724992 344216312 72645488 83% /System/Volumes/Data";
         let mount = mount_from_df_line(&mounts, line).expect("Data mount");
         assert_eq!(mount.point, Path::new("/System/Volumes/Data"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_firmlinks_identify_data_aliases() {
+        let table = concat!(
+            "/Users\tUsers\n",
+            "/System/Library/Caches\tSystem/Library/Caches\n",
+        );
+        let points = parse_macos_firmlinks(table).expect("firmlinks");
+        assert_eq!(points[0], Path::new("/Users"));
+        assert_eq!(points[1], Path::new("/System/Library/Caches"));
+        assert_eq!(parse_macos_firmlinks("/Users Users\n"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_root_scan_skips_data_firmlinks() {
+        let root = Path::new("/");
+        let data = Path::new("/System/Volumes/Data");
+        if data.is_dir() && device_for(root) != device_for(data) {
+            let foreign = foreign_mounts_for(root).expect("volume boundaries");
+            assert!(foreign.contains(&PathBuf::from("/Users")));
+        }
     }
 
     const OMARCHY: &str = "\
