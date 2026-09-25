@@ -194,15 +194,21 @@ fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
 #[cfg(windows)]
 fn in_windows_home(path: &Path, home: &Path) -> bool {
     path.starts_with(normalize(home))
-        || home
+        || path
             .canonicalize()
-            .is_ok_and(|canonical| path.starts_with(canonical))
+            .ok()
+            .zip(home.canonicalize().ok())
+            .is_some_and(|(path, home)| path.starts_with(home))
 }
 
 #[cfg(windows)]
 fn is_windows_home(path: &Path, home: &Path) -> bool {
     path == normalize(home)
-        || home.canonicalize().is_ok_and(|canonical| path == canonical)
+        || path
+            .canonicalize()
+            .ok()
+            .zip(home.canonicalize().ok())
+            .is_some_and(|(path, home)| path == home)
 }
 
 fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
@@ -735,7 +741,9 @@ mod tests {
         let home = temp.path().join("a");
         let canonical = home.canonicalize().expect("canonical home");
         assert!(is_windows_home(&canonical, &home));
+        assert!(is_windows_home(&home, &canonical));
         assert!(in_windows_home(&canonical.join("b"), &home));
+        assert!(in_windows_home(&home.join("b"), &canonical));
     }
 
     #[cfg(windows)]
