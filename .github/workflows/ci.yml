@@ -44,6 +44,15 @@ jobs:
       - name: Test
         run: cargo xtask test
 
+      # A bind mount keeps st_dev, so this exercises the mount-ID guard rather
+      # than only the ordinary cross-device case.
+      - name: Nested bind-mount deletion regression
+        run: |
+          cargo test -p disktree-core --no-run --locked
+          test_bin=$(find target/debug/deps -maxdepth 1 -type f -name 'disktree_core-*' -perm -111 -print -quit)
+          test -n "$test_bin"
+          sudo unshare --mount --propagation private "$test_bin" --ignored nested_bind_mount_preserves_unmarked_files
+
   macos:
     name: macOS lint, test, and build
     runs-on: macos-15

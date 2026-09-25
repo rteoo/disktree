@@ -96,6 +96,8 @@ pub fn plan(targets: &[Target], root: &Path) -> Plan {
     let home = crate::home_dir();
     let mut plan = Plan::default();
     let mut accepted: Vec<Target> = Vec::new();
+    #[cfg(target_os = "linux")]
+    let mounts = (!targets.is_empty()).then(linux_mounts);
 
     for target in targets {
         let path = normalize(&target.path);
@@ -105,6 +107,24 @@ pub fn plan(targets: &[Target], root: &Path) -> Plan {
                 reason,
             });
             continue;
+        }
+        #[cfg(target_os = "linux")]
+        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+            let reason = match mounts.as_ref().expect("targets are not empty") {
+                Ok(mounts) => mount_at_or_below(&path, mounts).map(|mount| {
+                    format!("{} is mounted inside the target", mount.display())
+                }),
+                Err(error) => Some(format!(
+                    "cannot inspect mounted filesystems: {error}"
+                )),
+            };
+            if let Some(reason) = reason {
+                plan.blocked.push(Blocked {
+                    path: target.path.clone(),
+                    reason,
+                });
+                continue;
+            }
         }
         accepted.push(Target {
             path,
@@ -128,6 +148,64 @@ pub fn plan(targets: &[Target], root: &Path) -> Plan {
     }
     plan.targets = outer;
     plan
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mounts() -> io::Result<Vec<PathBuf>> {
+    parse_linux_mounts(&fs::read("/proc/self/mounts")?)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_mounts(table: &[u8]) -> io::Result<Vec<PathBuf>> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let mut mounts = Vec::new();
+    for line in table
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let field = line
+            .split(u8::is_ascii_whitespace)
+            .filter(|field| !field.is_empty())
+            .nth(1)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        let mut point = Vec::with_capacity(field.len());
+        let mut index = 0;
+        while index < field.len() {
+            if field[index] == b'\\' {
+                let digits = field
+                    .get(index + 1..index + 4)
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+                if !digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+                    return Err(io::Error::from(io::ErrorKind::InvalidData));
+                }
+                let value = u16::from(digits[0] - b'0') * 64
+                    + u16::from(digits[1] - b'0') * 8
+                    + u16::from(digits[2] - b'0');
+                point.push(u8::try_from(value).map_err(|_| {
+                    io::Error::from(io::ErrorKind::InvalidData)
+                })?);
+                index += 4;
+            } else {
+                point.push(field[index]);
+                index += 1;
+            }
+        }
+        mounts.push(PathBuf::from(OsString::from_vec(point)));
+    }
+    Ok(mounts)
+}
+
+#[cfg(target_os = "linux")]
+fn mount_at_or_below<'a>(
+    path: &Path,
+    mounts: &'a [PathBuf],
+) -> Option<&'a Path> {
+    mounts
+        .iter()
+        .find(|mount| mount.starts_with(path))
+        .map(PathBuf::as_path)
 }
 
 /// Why this path must not be removed, if it must not.
@@ -624,8 +702,46 @@ fn run(
     });
 }
 
-/// `rm -rf` semantics on Unix: a symlink is unlinked, never followed.
+/// Delete on Linux without crossing a mount or following a directory link.
+#[cfg(target_os = "linux")]
+pub fn remove_permanently(path: &Path) -> io::Result<()> {
+    use rustix::fs::{AtFlags, unlinkat};
+
+    let meta = fs::symlink_metadata(path)?;
+    let (parent, name) = linux_parent(path)?;
+    if !meta.is_dir() {
+        return unlinkat(&parent, name, AtFlags::empty())
+            .map_err(Into::into);
+    }
+
+    // A known nested mount blocks the whole target before any marked file is
+    // removed. The descriptor walk below also catches mount changes afterward.
+    // ceiling: concurrent same-volume renames can replace marked names; a
+    // future adversarial-concurrency design needs stable object identities.
+    let mounts = linux_mounts()?;
+    if let Some(mount) = mount_at_or_below(path, &mounts) {
+        return Err(io::Error::other(format!(
+            "refusing to remove mounted filesystem {}",
+            mount.display()
+        )));
+    }
+
+    let dir = open_linux_dir(&parent, name)?;
+    let top = LinuxVolume::of(&dir)?;
+    if !LinuxVolume::of(&parent)?.same_as(&top) {
+        return Err(io::Error::other(format!(
+            "refusing to remove mounted filesystem {}",
+            path.display()
+        )));
+    }
+    remove_linux_contents(&dir, &top, path)?;
+    drop(dir);
+    unlinkat(&parent, name, AtFlags::REMOVEDIR).map_err(Into::into)
+}
+
+/// `rm -rf` semantics on macOS: a symlink is unlinked, never followed.
 /// Windows reparse points are refused because they can redirect removal.
+#[cfg(not(target_os = "linux"))]
 pub fn remove_permanently(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     refuse_reparse_point(path)?;
@@ -637,6 +753,128 @@ pub fn remove_permanently(path: &Path) -> io::Result<()> {
     } else {
         fs::remove_file(path)
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct LinuxVolume {
+    device: u64,
+    mount_id: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxVolume {
+    fn of(dir: &std::os::fd::OwnedFd) -> io::Result<Self> {
+        use rustix::fs::{AtFlags, StatxFlags, statx};
+
+        let device = rustix::fs::fstat(dir)?.st_dev;
+        // Bind mounts keep st_dev, so an unavailable mount ID must fail closed.
+        let stat = statx(dir, c"", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)?;
+        if stat.stx_mask & StatxFlags::MNT_ID.bits() == 0 {
+            return Err(io::Error::other("mount ID unavailable"));
+        }
+        Ok(Self {
+            device,
+            mount_id: stat.stx_mnt_id,
+        })
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        self.device == other.device && self.mount_id == other.mount_id
+    }
+}
+
+/// Open every parent component separately so a linked parent cannot redirect
+/// deletion outside the path that was marked.
+#[cfg(target_os = "linux")]
+fn linux_parent(
+    path: &Path,
+) -> io::Result<(std::os::fd::OwnedFd, &std::ffi::OsStr)> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut dir = if path.is_absolute() {
+        open_linux_dir(rustix::fs::CWD, Path::new("/"))?
+    } else {
+        open_linux_dir(rustix::fs::CWD, Path::new("."))?
+    };
+    for component in parent.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                dir = open_linux_dir(&dir, name)?;
+            }
+            Component::ParentDir => {
+                dir = open_linux_dir(&dir, Path::new(".."))?;
+            }
+            Component::Prefix(_) => {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+        }
+    }
+    Ok((dir, name))
+}
+
+#[cfg(target_os = "linux")]
+fn open_linux_dir<P: rustix::path::Arg>(
+    parent: impl std::os::fd::AsFd,
+    name: P,
+) -> rustix::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn remove_linux_contents(
+    dir: &std::os::fd::OwnedFd,
+    top: &LinuxVolume,
+    path: &Path,
+) -> io::Result<()> {
+    use rustix::fs::{AtFlags, Dir, unlinkat};
+    use rustix::io::Errno;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    // Collect names first: unlinking during readdir can skip later entries.
+    let mut names = Vec::new();
+    for entry in Dir::read_from(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
+        }
+    }
+
+    for name in names {
+        let child_path = path.join(OsStr::from_bytes(name.to_bytes()));
+        let child = match open_linux_dir(dir, &name) {
+            Ok(child) => child,
+            Err(Errno::NOTDIR | Errno::LOOP) => {
+                unlinkat(dir, &name, AtFlags::empty())?;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !top.same_as(&LinuxVolume::of(&child)?) {
+            return Err(io::Error::other(format!(
+                "stopped at mounted filesystem {}; nothing on it was touched",
+                child_path.display()
+            )));
+        }
+        remove_linux_contents(&child, top, &child_path)?;
+        drop(child);
+        unlinkat(dir, &name, AtFlags::REMOVEDIR)?;
+    }
+    Ok(())
 }
 
 /// Detect nested junctions before any deletion begins, so an unmarked volume
@@ -1073,6 +1311,140 @@ mod tests {
         if Path::new("/proc/self").exists() {
             assert!(is_mount_point(Path::new("/proc")));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nested_mount_blocks_the_target_but_not_a_sibling() {
+        let temp = tree();
+        let root = temp.path();
+        let mounts = vec![root.join("a/b"), root.join("other")];
+        assert_eq!(
+            mount_at_or_below(&root.join("a"), &mounts),
+            Some(root.join("a/b").as_path())
+        );
+        assert_eq!(
+            mount_at_or_below(&root.join("a/b"), &mounts),
+            Some(root.join("a/b").as_path())
+        );
+        assert_eq!(mount_at_or_below(&root.join("a/one.bin"), &mounts), None);
+        assert_eq!(mount_at_or_below(&root.join("a-real"), &mounts), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mount_table_decodes_escaped_paths() {
+        let mounts = parse_linux_mounts(
+            b"disk /tmp/a\\040b\\011c\\012d\\134e ext4 rw 0 0\n",
+        )
+        .expect("mount table");
+        assert_eq!(mounts, vec![PathBuf::from("/tmp/a b\tc\nd\\e")]);
+        assert!(parse_linux_mounts(b"disk /tmp/bad\\999 ext4 rw 0 0\n")
+            .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linked_parent_cannot_redirect_permanent_removal() {
+        let temp = tree();
+        let outside = TempDir::new().expect("tempdir");
+        let keep = outside.path().join("keep.bin");
+        fs::write(&keep, b"keep").expect("write");
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("link"))
+            .expect("symlink");
+
+        assert!(
+            remove_permanently(&temp.path().join("link/keep.bin")).is_err()
+        );
+        assert!(keep.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn permanent_removal_takes_nested_files_without_following_links() {
+        let temp = tree();
+        let outside = TempDir::new().expect("tempdir");
+        let keep = outside.path().join("keep.bin");
+        fs::write(&keep, b"keep").expect("write");
+        let doomed = temp.path().join("a");
+        fs::create_dir_all(doomed.join("b/c/d")).expect("mkdir");
+        fs::write(doomed.join("b/c/d/.hidden"), b"x").expect("write");
+        std::os::unix::fs::symlink(outside.path(), doomed.join("link"))
+            .expect("symlink");
+
+        remove_permanently(&doomed).expect("remove tree");
+        assert!(!doomed.exists());
+        assert!(keep.exists());
+        assert!(temp.path().join("other").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mount_ids_distinguish_proc_from_its_parent() {
+        let root = open_linux_dir(rustix::fs::CWD, Path::new("/"))
+            .expect("open root");
+        let proc = open_linux_dir(&root, Path::new("proc"))
+            .expect("open proc");
+        assert!(!LinuxVolume::of(&root)
+            .expect("root mount")
+            .same_as(&LinuxVolume::of(&proc).expect("proc mount")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires mount privileges"]
+    fn nested_bind_mount_preserves_unmarked_files() {
+        struct BindMount {
+            path: PathBuf,
+            temp: Option<TempDir>,
+            mounted: bool,
+        }
+
+        impl Drop for BindMount {
+            fn drop(&mut self) {
+                if self.mounted
+                    && !Command::new("umount")
+                        .arg(&self.path)
+                        .status()
+                        .is_ok_and(|status| status.success())
+                {
+                    // Never let TempDir recurse through a mount on cleanup.
+                    if let Some(temp) = self.temp.take() {
+                        std::mem::forget(temp);
+                    }
+                }
+            }
+        }
+
+        let temp = tree();
+        let marked = temp.path().join("a");
+        let source = temp.path().join("other");
+        let mountpoint = marked.join("b");
+        let keep = source.join("keep.bin");
+        fs::write(&keep, b"keep").expect("write");
+        let status = Command::new("mount")
+            .arg("--bind")
+            .arg(&source)
+            .arg(&mountpoint)
+            .status()
+            .expect("mount command");
+        assert!(status.success(), "bind mount");
+        let mut mounted = BindMount {
+            path: mountpoint,
+            temp: Some(temp),
+            mounted: true,
+        };
+
+        let error = remove_permanently(&marked).expect_err("nested mount");
+        assert!(error.to_string().contains("mounted filesystem"));
+        assert!(keep.exists(), "mounted data was not touched");
+        assert!(marked.join("one.bin").exists(), "preflight blocked all work");
+        let status = Command::new("umount")
+            .arg(&mounted.path)
+            .status()
+            .expect("umount command");
+        assert!(status.success(), "unmount fixture");
+        mounted.mounted = false;
     }
 
     #[test]
