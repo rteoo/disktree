@@ -226,6 +226,10 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
             "part of the system under {system}: use the package manager"
         ));
     }
+    #[cfg(target_os = "macos")]
+    if has_symlink_ancestor(path, root) {
+        return Some("a symlinked parent could leave the scanned root".into());
+    }
     if is_mount_point(path) {
         return Some(
             "a mount point: removing it would cross onto another filesystem"
@@ -233,6 +237,28 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
         );
     }
     None
+}
+
+/// Trash canonicalizes a target's parent. A followed directory link must not
+/// redirect removal outside the tree the user marked.
+#[cfg(target_os = "macos")]
+fn has_symlink_ancestor(path: &Path, root: &Path) -> bool {
+    let mut parent = path.parent();
+    while let Some(current) = parent {
+        if current == root {
+            return false;
+        }
+        if !current.starts_with(root) {
+            return true;
+        }
+        match fs::symlink_metadata(current) {
+            Ok(meta) if meta.file_type().is_symlink() => return true,
+            Err(_) => return true,
+            _ => {}
+        }
+        parent = current.parent();
+    }
+    true
 }
 
 /// Whether `path` sits on a different device than its parent, i.e. is a
@@ -762,6 +788,23 @@ mod tests {
         move_to_trash(&selected, TrashBackend::Native).expect("Finder Trash");
         assert!(!selected.exists());
         assert!(temp.path().join("a/one.bin").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn followed_directory_link_cannot_redirect_removal() {
+        let root = TempDir::new().expect("tempdir");
+        let outside = TempDir::new().expect("tempdir");
+        let precious = outside.path().join("precious.bin");
+        fs::write(&precious, b"keep").expect("write");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link"))
+            .expect("symlink");
+
+        let selected = root.path().join("link/precious.bin");
+        let plan = plan(&[target(&selected, 4)], root.path());
+        assert!(plan.is_empty());
+        assert_eq!(plan.blocked.len(), 1);
+        assert!(precious.exists());
     }
 
     fn target(path: &Path, bytes: u64) -> Target {
