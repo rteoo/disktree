@@ -779,7 +779,7 @@ impl LinuxVolume {
         })
     }
 
-    fn same_as(&self, other: &Self) -> bool {
+    const fn same_as(&self, other: &Self) -> bool {
         self.device == other.device && self.mount_id == other.mount_id
     }
 }
@@ -1437,6 +1437,12 @@ mod tests {
             mounted: true,
         };
 
+        let planned = plan(
+            &[target(&marked, 0)],
+            marked.parent().expect("fixture root"),
+        );
+        assert!(planned.is_empty(), "nested mount is blocked in review");
+        assert_eq!(planned.blocked.len(), 1);
         let error = remove_permanently(&marked).expect_err("nested mount");
         assert!(error.to_string().contains("mounted filesystem"));
         assert!(keep.exists(), "mounted data was not touched");
