@@ -12,6 +12,7 @@
 //! * [`RemovalMode::Trash`] — move to the desktop trash, using `trash-put`,
 //!   then `gio trash`, then a built-in XDG implementation. The backend is
 //!   detected once and named in the UI so the user knows what actually happens.
+//!   macOS uses Finder Trash through the native API.
 
 use std::fs;
 use std::io;
@@ -320,8 +321,8 @@ pub fn normalize(path: &Path) -> PathBuf {
 /// Which tool, if any, moves files to the desktop trash.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrashBackend {
-    /// The operating system's native Trash or Recycle Bin.
-    #[cfg(any(target_os = "macos", windows))]
+    /// Finder Trash on macOS.
+    #[cfg(target_os = "macos")]
     Native,
     /// `trash-put` from trash-cli.
     TrashPut,
@@ -338,7 +339,7 @@ impl TrashBackend {
     pub const fn is_available(self) -> bool {
         match self {
             Self::TrashPut | Self::Gio | Self::XdgHome => true,
-            #[cfg(any(target_os = "macos", windows))]
+            #[cfg(target_os = "macos")]
             Self::Native => true,
             Self::Unavailable => false,
         }
@@ -348,8 +349,6 @@ impl TrashBackend {
         match self {
             #[cfg(target_os = "macos")]
             Self::Native => "Finder Trash",
-            #[cfg(windows)]
-            Self::Native => "Recycle Bin",
             Self::TrashPut => "trash-put",
             Self::Gio => "gio trash",
             Self::XdgHome => "XDG trash",
@@ -361,8 +360,6 @@ impl TrashBackend {
         match self {
             #[cfg(target_os = "macos")]
             Self::Native => "uses Finder Trash",
-            #[cfg(windows)]
-            Self::Native => "uses Windows Recycle Bin",
             Self::TrashPut => {
                 "uses trash-cli, the same trash as your file manager"
             }
@@ -383,12 +380,7 @@ pub const fn detect_trash_backend() -> TrashBackend {
     TrashBackend::Native
 }
 
-#[cfg(windows)]
-pub const fn detect_trash_backend() -> TrashBackend {
-    TrashBackend::Native
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 pub fn detect_trash_backend() -> TrashBackend {
     if which("trash-put") {
         TrashBackend::TrashPut
@@ -401,7 +393,7 @@ pub fn detect_trash_backend() -> TrashBackend {
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 fn which(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -585,7 +577,7 @@ pub fn move_to_trash(path: &Path, backend: TrashBackend) -> io::Result<()> {
         ensure_no_nested_mounts(path)?;
     }
     match backend {
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(target_os = "macos")]
         TrashBackend::Native => trash::delete(path).map_err(io::Error::other),
         TrashBackend::TrashPut => run_tool(Path::new("trash-put"), &[], path),
         TrashBackend::Gio => run_tool(Path::new("gio"), &["trash"], path),
@@ -759,6 +751,16 @@ mod tests {
         let nested = temp.path().join("a/b");
         let error = ensure_no_nested_mounts_in(temp.path(), &[nested]);
         assert!(error.is_err());
+        assert!(temp.path().join("a/one.bin").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_trash_moves_only_the_selected_file() {
+        let temp = tree();
+        let selected = temp.path().join("a/c.bin");
+        move_to_trash(&selected, TrashBackend::Native).expect("Finder Trash");
+        assert!(!selected.exists());
         assert!(temp.path().join("a/one.bin").exists());
     }
 
@@ -1044,7 +1046,7 @@ mod tests {
         assert!(error.to_string().contains("no trash here"), "{error}");
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn detection_prefers_a_tool_this_machine_has() {
         let backend = detect_trash_backend();
