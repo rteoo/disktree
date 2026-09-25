@@ -349,7 +349,7 @@ impl TrashBackend {
 
 /// Detect the best available trash backend for this machine.
 #[cfg(target_os = "macos")]
-pub fn detect_trash_backend() -> TrashBackend {
+pub const fn detect_trash_backend() -> TrashBackend {
     // The XDG fallback is not Finder Trash.
     TrashBackend::Unavailable
 }
