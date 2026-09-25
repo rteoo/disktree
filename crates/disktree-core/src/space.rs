@@ -69,10 +69,16 @@ pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
 /// The device a path's filesystem is mounted from, such as
 /// `/dev/nvme0n1p2`: the mount with the longest prefix of `path` in
 /// `/proc/self/mounts`. `None` where that table cannot be read.
+#[cfg(not(target_os = "macos"))]
 pub fn device_for(path: &Path) -> Option<String> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     device_in(&table, &path)
+}
+
+#[cfg(target_os = "macos")]
+pub fn device_for(path: &Path) -> Option<String> {
+    volume_root_for(path).map(|root| root.display().to_string())
 }
 
 /// [`device_for`] over a given mount table, for testing.
@@ -186,22 +192,66 @@ pub fn volume_root(mounts: &[Mount], path: &Path) -> Option<PathBuf> {
 }
 
 /// [`volume_root`] for this machine.
+#[cfg(not(target_os = "macos"))]
 pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     volume_root(&parse_mounts(&table), &path)
 }
 
+/// On macOS, walk to the highest ancestor on the same mounted filesystem.
+/// APFS can mount a separate Data volume, so `/` is not always this volume.
+#[cfg(target_os = "macos")]
+pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let mut root = path.canonicalize().ok()?;
+    let device = std::fs::metadata(&root).ok()?.dev();
+    while let Some(parent) = root.parent() {
+        let Ok(parent_meta) = std::fs::metadata(parent) else {
+            break;
+        };
+        if parent_meta.dev() != device {
+            break;
+        }
+        root = parent.to_path_buf();
+    }
+    Some(root)
+}
+
 /// [`foreign_mounts`] for this machine; `None` when the mount table cannot
 /// be read, so the caller can fall back to comparing devices.
+#[cfg(not(target_os = "macos"))]
 pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     Some(foreign_mounts(&parse_mounts(&table), root))
 }
 
+/// macOS does not have `/proc/self/mounts`; the scanner compares `st_dev`.
+#[cfg(target_os = "macos")]
+pub fn foreign_mounts_for(_root: &Path) -> Option<Vec<PathBuf>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_volume_root_is_an_ancestor_on_the_same_device() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().canonicalize().expect("canonical path");
+        let root = volume_root_for(&path).expect("volume root");
+        assert!(path.starts_with(&root));
+        assert_eq!(
+            std::fs::metadata(&path).expect("path metadata").dev(),
+            std::fs::metadata(&root).expect("root metadata").dev()
+        );
+        assert_eq!(foreign_mounts_for(&root), None);
+    }
 
     const OMARCHY: &str = "\
 sys /sys sysfs rw 0 0

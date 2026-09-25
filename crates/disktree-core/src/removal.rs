@@ -152,16 +152,37 @@ const SYSTEM_TREES: [&str; 14] = [
     "/efi",
 ];
 
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_TREES: [&str; 4] = [
+    "/Applications",
+    "/Library",
+    "/System",
+    "/private",
+];
+
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
 fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
     if home.is_some_and(|home| path.starts_with(normalize(home))) {
         return None;
     }
-    SYSTEM_TREES
+    let linux_tree = SYSTEM_TREES
         .iter()
         .find(|tree| path.starts_with(tree))
-        .copied()
+        .copied();
+    #[cfg(target_os = "macos")]
+    {
+        linux_tree.or_else(|| {
+            MACOS_SYSTEM_TREES
+                .iter()
+                .find(|tree| path.starts_with(tree))
+                .copied()
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        linux_tree
+    }
 }
 
 fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
@@ -444,14 +465,41 @@ fn run(
 pub fn remove_permanently(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
+        #[cfg(target_os = "macos")]
+        ensure_no_nested_mounts(path)?;
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
     }
 }
 
+/// Refuse an entire directory before touching it if removal would cross onto
+/// a mounted volume. The preflight also keeps partial deletion from reaching
+/// a mount point after earlier siblings have already been removed.
+#[cfg(target_os = "macos")]
+fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if is_mount_point(&child) {
+            return Err(io::Error::other(format!(
+                "refusing to remove mounted filesystem {}",
+                child.display()
+            )));
+        }
+        if fs::symlink_metadata(&child)?.is_dir() {
+            ensure_no_nested_mounts(&child)?;
+        }
+    }
+    Ok(())
+}
+
 /// Move one path to the desktop trash.
 pub fn move_to_trash(path: &Path, backend: TrashBackend) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if fs::symlink_metadata(path)?.is_dir() {
+        ensure_no_nested_mounts(path)?;
+    }
     match backend {
         TrashBackend::TrashPut => run_tool(Path::new("trash-put"), &[], path),
         TrashBackend::Gio => run_tool(Path::new("gio"), &["trash"], path),
@@ -589,6 +637,21 @@ fn deletion_date() -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_directories_are_refused() {
+        let home = Path::new("/Users/example");
+        for path in [
+            "/Applications/Notes.app",
+            "/Library/Preferences",
+            "/System/Library",
+            "/private/etc",
+        ] {
+            assert!(system_tree(Path::new(path), Some(home)).is_some());
+        }
+        assert_eq!(system_tree(home, Some(home)), None);
+    }
 
     fn target(path: &Path, bytes: u64) -> Target {
         Target {
