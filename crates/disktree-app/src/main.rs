@@ -132,11 +132,21 @@ fn parse_args() -> Result<Args> {
                 std::process::exit(0);
             }
             "-a" | "--apparent-size" => options.apparent_size = true,
+            #[cfg(windows)]
+            "-l" | "--follow-links" => {
+                anyhow::bail!("--follow-links is unavailable on Windows");
+            }
+            #[cfg(not(windows))]
             "-l" | "--follow-links" => options.follow_links = true,
             "-H" | "--no-hidden" => options.include_hidden = false,
             // Staying on one volume is the default; the flag is kept so
             // old invocations still work.
             "-x" | "--one-filesystem" => options.one_filesystem = true,
+            #[cfg(windows)]
+            "-X" | "--cross-filesystems" => {
+                anyhow::bail!("--cross-filesystems is unavailable on Windows");
+            }
+            #[cfg(not(windows))]
             "-X" | "--cross-filesystems" => options.one_filesystem = false,
             "-D" | "--disk" => disk = true,
             "-d" | "--depth" => {

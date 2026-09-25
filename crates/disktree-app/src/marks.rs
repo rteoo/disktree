@@ -113,7 +113,7 @@ pub fn is_hidden(path: &Path) -> bool {
         use std::os::windows::fs::MetadataExt as _;
 
         const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        return std::fs::symlink_metadata(path).is_ok_and(|meta| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| {
             meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
         });
     }

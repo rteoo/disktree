@@ -55,6 +55,8 @@ cargo build --release --locked -p disktree-app
 It scans your user profile by default; `--disk` scans its drive. File sizes
 use allocated bytes, and marked paths can be moved to the Recycle Bin. Linux
 installation and runtime behavior remain as described above.
+Windows reparse points are excluded from scans; the `--follow-links` and
+`--cross-filesystems` options report that limit if requested.
 
 ## Use
 
