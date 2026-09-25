@@ -184,13 +184,13 @@ fn parse_args() -> Result<Args> {
     let home = disktree_core::home_dir();
     let root = match root {
         _ if disk => {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             {
                 home.as_deref()
                     .and_then(disktree_core::space::volume_root_for)
                     .context("cannot determine the home volume")?
             }
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             {
                 home.as_deref()
                     .and_then(disktree_core::space::volume_root_for)

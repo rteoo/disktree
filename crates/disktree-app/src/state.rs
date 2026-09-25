@@ -1963,6 +1963,16 @@ impl Disktree {
         let control = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
 
+        // On macOS the platform modifier is Command. Keep the app's single-key
+        // actions from swallowing native shortcuts such as Command-P.
+        #[cfg(target_os = "macos")]
+        if event.keystroke.modifiers.platform {
+            if key == "q" {
+                cx.quit();
+            }
+            return;
+        }
+
         // The alert dialog owns Enter and Escape while it is open; a key that
         // bubbles up to here must not also act on the screen behind it.
         if self.confirm_open {

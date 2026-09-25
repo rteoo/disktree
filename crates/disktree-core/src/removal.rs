@@ -12,6 +12,7 @@
 //! * [`RemovalMode::Trash`] — move to the desktop trash, using `trash-put`,
 //!   then `gio trash`, then a built-in XDG implementation. The backend is
 //!   detected once and named in the UI so the user knows what actually happens.
+//!   macOS uses Finder Trash through the native API.
 
 use std::fs;
 use std::io;
@@ -153,17 +154,53 @@ const SYSTEM_TREES: [&str; 14] = [
     "/efi",
 ];
 
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_TREES: [&str; 5] =
+    ["/Applications", "/Library", "/System", "/Users", "/private"];
+
+#[cfg(target_os = "macos")]
+fn macos_logical_path(path: &Path) -> PathBuf {
+    path.strip_prefix("/System/Volumes/Data")
+        .map_or_else(|_| path.to_path_buf(), |rest| Path::new("/").join(rest))
+}
+
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
 #[cfg(unix)]
 fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
-    if home.is_some_and(|home| path.starts_with(normalize(home))) {
+    // A whole-Data-volume scan reaches the same files through their physical
+    // mount path; compare its logical root paths with the normal home path.
+    #[cfg(target_os = "macos")]
+    let logical = macos_logical_path(path);
+    #[cfg(target_os = "macos")]
+    let path = logical.as_path();
+
+    #[cfg(target_os = "macos")]
+    let in_home = home.is_some_and(|home| {
+        path.starts_with(macos_logical_path(&normalize(home)))
+    });
+    #[cfg(not(target_os = "macos"))]
+    let in_home = home.is_some_and(|home| path.starts_with(normalize(home)));
+    if in_home {
         return None;
     }
-    SYSTEM_TREES
+    let linux_tree = SYSTEM_TREES
         .iter()
         .find(|tree| path.starts_with(tree))
-        .copied()
+        .copied();
+    #[cfg(target_os = "macos")]
+    {
+        linux_tree.or_else(|| {
+            MACOS_SYSTEM_TREES
+                .iter()
+                .find(|tree| path.starts_with(tree))
+                .copied()
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        linux_tree
+    }
 }
 
 /// Refuse Windows-managed directories even when a whole-drive scan sees them.
@@ -223,7 +260,12 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
     }
     #[cfg(windows)]
     let is_home = home.is_some_and(|home| is_windows_home(path, home));
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let is_home = home.is_some_and(|home| {
+        path == normalize(home)
+            || macos_logical_path(path) == macos_logical_path(&normalize(home))
+    });
+    #[cfg(all(unix, not(target_os = "macos")))]
     let is_home = home.is_some_and(|home| path == normalize(home));
     if is_home {
         return Some("the home directory cannot be removed".into());
@@ -239,6 +281,10 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
             "part of the system under {system}: use the package manager"
         ));
     }
+    #[cfg(target_os = "macos")]
+    if has_symlink_ancestor(path, root) {
+        return Some("a symlinked parent could leave the scanned root".into());
+    }
     if is_mount_point(path) {
         return Some(
             "a mount point: removing it would cross onto another filesystem"
@@ -248,9 +294,31 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
     None
 }
 
+/// Trash canonicalizes a target's parent. A followed directory link must not
+/// redirect removal outside the tree the user marked.
+#[cfg(target_os = "macos")]
+fn has_symlink_ancestor(path: &Path, root: &Path) -> bool {
+    let mut parent = path.parent();
+    while let Some(current) = parent {
+        if current == root {
+            return false;
+        }
+        if !current.starts_with(root) {
+            return true;
+        }
+        match fs::symlink_metadata(current) {
+            Ok(meta) if meta.file_type().is_symlink() => return true,
+            Err(_) => return true,
+            _ => {}
+        }
+        parent = current.parent();
+    }
+    true
+}
+
 /// Whether `path` sits on a different device than its parent, i.e. is a
 /// mount point. Descending into one would delete data the user never marked.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn is_mount_point(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     let Ok(meta) = fs::symlink_metadata(path) else {
@@ -279,6 +347,33 @@ pub fn is_mount_point(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| {
         meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     })
+}
+
+#[cfg(target_os = "macos")]
+pub fn is_mount_point(path: &Path) -> bool {
+    // APFS can report the same device number on both sides of a mount.
+    crate::space::macos_mount_points().is_none_or(|mounts| {
+        mounts.iter().any(|point| point == path) || device_boundary(path)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn device_boundary(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return true;
+    };
+    match fs::symlink_metadata(parent) {
+        Ok(other) => other.dev() != meta.dev(),
+        Err(_) => true,
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -319,8 +414,8 @@ pub fn normalize(path: &Path) -> PathBuf {
 /// Which tool, if any, moves files to the desktop trash.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrashBackend {
-    /// The Windows Recycle Bin.
-    #[cfg(windows)]
+    /// Finder Trash on macOS or the Windows Recycle Bin.
+    #[cfg(any(windows, target_os = "macos"))]
     Native,
     /// `trash-put` from trash-cli.
     TrashPut,
@@ -337,7 +432,7 @@ impl TrashBackend {
     pub const fn is_available(self) -> bool {
         match self {
             Self::TrashPut | Self::Gio | Self::XdgHome => true,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             Self::Native => true,
             Self::Unavailable => false,
         }
@@ -347,6 +442,8 @@ impl TrashBackend {
         match self {
             #[cfg(windows)]
             Self::Native => "Recycle Bin",
+            #[cfg(target_os = "macos")]
+            Self::Native => "Finder Trash",
             Self::TrashPut => "trash-put",
             Self::Gio => "gio trash",
             Self::XdgHome => "XDG trash",
@@ -358,6 +455,8 @@ impl TrashBackend {
         match self {
             #[cfg(windows)]
             Self::Native => "uses Windows Recycle Bin",
+            #[cfg(target_os = "macos")]
+            Self::Native => "uses Finder Trash",
             Self::TrashPut => {
                 "uses trash-cli, the same trash as your file manager"
             }
@@ -373,12 +472,12 @@ impl TrashBackend {
 }
 
 /// Detect the best available trash backend for this machine.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub const fn detect_trash_backend() -> TrashBackend {
     TrashBackend::Native
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn detect_trash_backend() -> TrashBackend {
     if which("trash-put") {
         TrashBackend::TrashPut
@@ -391,7 +490,7 @@ pub fn detect_trash_backend() -> TrashBackend {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn which(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -532,7 +631,7 @@ pub fn remove_permanently(path: &Path) -> io::Result<()> {
     refuse_reparse_point(path)?;
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         ensure_no_nested_mounts(path)?;
         fs::remove_dir_all(path)
     } else {
@@ -550,6 +649,37 @@ fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
         refuse_reparse_point(&child)?;
         if fs::symlink_metadata(&child)?.is_dir() {
             ensure_no_nested_mounts(&child)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an entire directory before touching it if removal would cross onto
+/// a mounted volume. The preflight also keeps partial deletion from reaching
+/// a mount point after earlier siblings have already been removed.
+#[cfg(target_os = "macos")]
+fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
+    let mounts = crate::space::macos_mount_points()
+        .ok_or_else(|| io::Error::other("cannot read macOS mount table"))?;
+    ensure_no_nested_mounts_in(path, &mounts)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_no_nested_mounts_in(
+    path: &Path,
+    mounts: &[PathBuf],
+) -> io::Result<()> {
+    if mounts.iter().any(|point| point == path) || device_boundary(path) {
+        return Err(io::Error::other(format!(
+            "refusing to remove mounted filesystem {}",
+            path.display()
+        )));
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if fs::symlink_metadata(&child)?.is_dir() {
+            ensure_no_nested_mounts_in(&child, mounts)?;
         }
     }
     Ok(())
@@ -575,8 +705,12 @@ pub fn move_to_trash(path: &Path, backend: TrashBackend) -> io::Result<()> {
             ensure_no_nested_mounts(path)?;
         }
     }
+    #[cfg(target_os = "macos")]
+    if fs::symlink_metadata(path)?.is_dir() {
+        ensure_no_nested_mounts(path)?;
+    }
     match backend {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         TrashBackend::Native => trash::delete(path).map_err(io::Error::other),
         TrashBackend::TrashPut => run_tool(Path::new("trash-put"), &[], path),
         TrashBackend::Gio => run_tool(Path::new("gio"), &["trash"], path),
@@ -760,6 +894,54 @@ mod tests {
         assert!(temp.path().join("a/one.bin").exists());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_directories_are_refused() {
+        let home = Path::new("/Users/example");
+        for path in [
+            "/Applications/Notes.app",
+            "/Library/Preferences",
+            "/System/Library",
+            "/Users/other/Documents",
+            "/private/etc",
+        ] {
+            assert!(system_tree(Path::new(path), Some(home)).is_some());
+        }
+        assert_eq!(system_tree(home, Some(home)), None);
+        assert_eq!(
+            system_tree(
+                Path::new("/System/Volumes/Data/Users/example/Documents"),
+                Some(home)
+            ),
+            None
+        );
+        assert_eq!(detect_trash_backend(), TrashBackend::Native);
+        let physical_home = Path::new("/System/Volumes/Data/Users/example");
+        let root = Path::new("/System/Volumes/Data");
+        let reason = refuse(physical_home, root, Some(home));
+        assert!(reason.is_some_and(|reason| reason.contains("home")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nested_mount_refuses_the_whole_removal_before_touching_files() {
+        let temp = tree();
+        let nested = temp.path().join("a/b");
+        let error = ensure_no_nested_mounts_in(temp.path(), &[nested]);
+        assert!(error.is_err());
+        assert!(temp.path().join("a/one.bin").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_trash_moves_only_the_selected_file() {
+        let temp = tree();
+        let selected = temp.path().join("a/c.bin");
+        move_to_trash(&selected, TrashBackend::Native).expect("Finder Trash");
+        assert!(!selected.exists());
+        assert!(temp.path().join("a/one.bin").exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn reparse_targets_are_refused_by_both_removal_modes() {
@@ -774,6 +956,23 @@ mod tests {
         assert!(move_to_trash(&link, TrashBackend::Native).is_err());
         assert!(keep.exists());
         assert!(link.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn followed_directory_link_cannot_redirect_removal() {
+        let root = TempDir::new().expect("tempdir");
+        let outside = TempDir::new().expect("tempdir");
+        let precious = outside.path().join("precious.bin");
+        fs::write(&precious, b"keep").expect("write");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link"))
+            .expect("symlink");
+
+        let selected = root.path().join("link/precious.bin");
+        let plan = plan(&[target(&selected, 4)], root.path());
+        assert!(plan.is_empty());
+        assert_eq!(plan.blocked.len(), 1);
+        assert!(precious.exists());
     }
 
     fn target(path: &Path, bytes: u64) -> Target {
@@ -1063,7 +1262,7 @@ mod tests {
         assert!(error.to_string().contains("no trash here"), "{error}");
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn detection_prefers_a_tool_this_machine_has() {
         let backend = detect_trash_backend();
