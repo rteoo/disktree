@@ -224,8 +224,7 @@ fn a_permanent_deletion_asks_in_an_alert_dialog_then_removes(
             .expect("the junk directory");
         app.select(Some(junk.clone()), cx);
         app.toggle_mark(&junk, cx);
-        let plan = app.plan();
-        assert_eq!(plan.bytes(), 300_000, "{:?}", plan.blocked);
+        assert_eq!(app.plan().bytes(), 300_000);
     });
 
     press(cx, "c");
@@ -468,6 +467,38 @@ fn the_help_overlay_opens_and_closes(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn showing_a_tile_that_is_gone_says_so_instead(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    // The selection is .cache, the largest; take it away behind the tree.
+    std::fs::remove_dir_all(temp.path().join(".cache")).expect("remove");
+    press(cx, "o");
+    let notice = read(&view, cx, |app| app.notice.clone());
+    let (message, _) = notice.expect("a notice");
+    assert!(message.contains("no longer on disk"), "{message}");
+}
+
+#[gpui_kit::test]
+fn command_chords_are_not_read_as_plain_letters(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    // ⌘P and ⌘D are the menu bar's or nobody's; read as `p` and `d` they
+    // would hide the selection and re-scan.
+    let shown = read(&view, cx, |app| app.show_selection);
+    press(cx, "cmd-p cmd-d");
+    assert_eq!(read(&view, cx, |app| app.show_selection), shown);
+    assert!(read(&view, cx, |app| app.options.apparent_size));
+    press(cx, "p");
+    assert_eq!(read(&view, cx, |app| app.show_selection), !shown);
+}
+
+#[gpui_kit::test]
 fn the_treemap_zooms_with_the_wheel_and_resets(cx: &mut TestAppContext) {
     cx.update(gpui_omarchy::init);
     let temp = fixture();
@@ -561,6 +592,46 @@ fn the_review_screen_switches_removal_mode(cx: &mut TestAppContext) {
     );
     press(cx, "!");
     assert!(read(&view, cx, |app| app.marks.is_empty()));
+}
+
+/// `a` on the review screen copies a prompt for an agent naming the marked
+/// path, and removes nothing.
+#[gpui_kit::test]
+fn the_review_screen_copies_the_list_as_an_agent_prompt(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let junk = temp.path().join("junk");
+    let (view, cx) = view_over(temp.path(), cx);
+    update(&view, cx, |app, cx| {
+        app.marks.toggle(disktree_core::removal::Target {
+            path: junk.clone(),
+            bytes: 300_000,
+            is_dir: true,
+            hidden: false,
+        });
+        app.screen = Screen::Review;
+        cx.notify();
+    });
+    draw(cx);
+
+    press(cx, "a");
+    let copied = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .expect("a prompt on the clipboard");
+    assert!(copied.contains("free up disk space"), "{copied}");
+    assert!(
+        copied.contains(&format!("- {}", junk.display())),
+        "{copied}"
+    );
+    assert!(junk.exists(), "nothing was removed");
+    let notice = read(&view, cx, |app| app.notice.clone());
+    assert!(
+        notice.is_some_and(|(message, _)| message.contains("copied")),
+        "the copy is confirmed"
+    );
 }
 
 /// Escape in the alert dialog cancels: the dialog closes, the review screen
@@ -869,7 +940,7 @@ fn finish_scan(view: &Entity<Disktree>, cx: &mut Window) {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ready = update(view, cx, |app, cx| {
             app.poll_scan_once(epoch, cx);
-            app.scan.is_none()
+            app.tree().is_some()
         });
         if ready {
             return;
@@ -944,17 +1015,11 @@ fn widening_reuses_the_tree_it_has_and_reads_only_the_rest(
     });
     let before = read(&view, cx, |app| app.tree().map(|tree| tree.files));
 
-    // The trail runs from the volume root, and the scanned root sits below it.
+    // The trail runs from the top of the filesystem — "/", or a drive such
+    // as "C:\" — and the scanned root sits under its parents.
     let trail = read(&view, cx, Disktree::breadcrumbs);
-    assert_eq!(
-        trail[0].0,
-        temp.path()
-            .ancestors()
-            .last()
-            .expect("volume root")
-            .display()
-            .to_string()
-    );
+    let top = temp.path().ancestors().last().expect("a top");
+    assert_eq!(trail[0].0, top.display().to_string());
     assert!(
         trail.contains(&(
             temp.path()
@@ -1173,4 +1238,87 @@ fn marking_a_directory_marks_everything_inside_it(cx: &mut TestAppContext) {
     // Unmarking the directory unmarks everything.
     update(&view, cx, |app, cx| app.toggle_mark(&junk, cx));
     assert!(read(&view, cx, |app| app.marks.is_empty()));
+}
+
+/// `<` and `>` retrace the directories visited, are disabled when there is
+/// nowhere to go, and a fresh move ends what was ahead.
+#[gpui_kit::test]
+fn back_and_forward_retrace_where_you_have_been(cx: &mut TestAppContext) {
+    use gpui_kit::Modifiers;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    cx.simulate_resize(gpui_kit::size(px(1400.), px(900.)));
+    draw(cx);
+    let can = |view: &Entity<Disktree>, cx: &Window| {
+        read(view, cx, |app| (app.can_go_back(), app.can_go_forward()))
+    };
+    assert_eq!(can(&view, cx), (false, false), "nowhere to go yet");
+
+    let (junk, deeper, keep) = update(&view, cx, |app, cx| {
+        let junk = child_crumbs(app, &[], "junk");
+        let deeper = child_crumbs(app, &junk, "deeper");
+        let keep = child_crumbs(app, &[], "keep");
+        app.select(Some(deeper.clone()), cx);
+        app.descend(cx);
+        (junk, deeper, keep)
+    });
+    draw(cx);
+    assert_eq!(can(&view, cx), (true, false));
+
+    // Hovering `<` shows the card for where it goes, as hovering a tile
+    // does: here, the scanned root. It hangs below the button, never on it.
+    let back = cx
+        .debug_bounds("history-back")
+        .expect("the button is drawn");
+    cx.simulate_mouse_move(back.center(), None, Modifiers::none());
+    draw(cx);
+    let card = cx.debug_bounds("history-tip").expect("the card is shown");
+    assert!(card.top() >= back.bottom(), "{card:?} covers {back:?}");
+    assert_eq!(
+        read(&view, cx, |app| app.history_target(true)),
+        Some((0, Vec::new()))
+    );
+
+    let click = |cx: &mut Window, selector: &'static str| {
+        let bounds = cx.debug_bounds(selector).expect("the button is drawn");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        draw(cx);
+    };
+    click(cx, "history-back");
+    assert_eq!(
+        read(&view, cx, |app| app.crumbs.clone()),
+        Vec::<usize>::new()
+    );
+    assert_eq!(can(&view, cx), (false, true), "back at the start");
+
+    click(cx, "history-forward");
+    assert_eq!(read(&view, cx, |app| app.crumbs.clone()), deeper);
+    assert_eq!(can(&view, cx), (true, false));
+
+    // Up a level is a move of its own, and the keys retrace it too.
+    press(cx, "backspace");
+    assert_eq!(read(&view, cx, |app| app.crumbs.clone()), junk);
+    press(cx, "alt-left");
+    assert_eq!(read(&view, cx, |app| app.crumbs.clone()), deeper);
+    press(cx, "alt-left");
+    assert_eq!(
+        read(&view, cx, |app| app.crumbs.clone()),
+        Vec::<usize>::new()
+    );
+    press(cx, "alt-right");
+    assert_eq!(read(&view, cx, |app| app.crumbs.clone()), deeper);
+
+    // Going somewhere new from the middle of the history drops what was
+    // ahead of it, as in a browser.
+    press(cx, "alt-left");
+    update(&view, cx, |app, cx| app.go_to(keep, cx));
+    draw(cx);
+    assert_eq!(can(&view, cx), (true, false), "the forward trail is gone");
+    press(cx, "alt-left");
+    assert_eq!(
+        read(&view, cx, |app| app.crumbs.clone()),
+        Vec::<usize>::new()
+    );
 }

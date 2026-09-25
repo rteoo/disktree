@@ -108,6 +108,11 @@ impl Reclaim {
 /// The kind a directory name announces on its own, if any.
 pub fn category_of_name(name: &str) -> Option<Category> {
     let lower = name.to_ascii_lowercase();
+    // Windows: a work or school account's folder carries the organisation,
+    // `OneDrive - Contoso`, and Dropbox's does the same, `Dropbox (Contoso)`.
+    if lower.starts_with("onedrive - ") || lower.starts_with("dropbox (") {
+        return Some(Category::Synced);
+    }
     let category = match lower.as_str() {
         "src" | "code" | "projects" | "repos" | "dev" | "work"
         | "workspace" | "workspaces" | "github.com" | "gitlab.com"
@@ -122,9 +127,17 @@ pub fn category_of_name(name: &str) -> Option<Category> {
         | ".espressif" | ".arduino15" | ".config" | ".vscode" | ".zig"
         | ".rye" | ".conda" | "anaconda3" | "miniconda3" | ".opam"
         | ".ghcup" | ".stack" | ".julia" | ".dotnet" | ".android"
-        | ".sdkman" | ".volta" | ".yarn" | ".java" => Category::Toolchain,
+        | ".sdkman" | ".volta" | ".yarn" | ".java" | ".nuget"
+        // macOS: Xcode's and the simulators' state in ~/Library/Developer.
+        // Not `Developer` itself: ~/Developer is where Apple puts projects.
+        | "xcode" | "coresimulator" => Category::Toolchain,
         "sync" | "dropbox" | "nextcloud" | "google drive" | "onedrive"
-        | "pclouddrive" | "mega" | ".stversions" => Category::Synced,
+        | "pclouddrive" | "mega" | ".stversions"
+        // macOS: iCloud Drive, and the File Provider clients (Dropbox,
+        // Google Drive, OneDrive) since macOS 12.
+        | "mobile documents" | "cloudstorage"
+        // Windows: iCloud for Windows.
+        | "iclouddrive" => Category::Synced,
         ".git" => Category::Git,
         "pictures" | "photos" | "music" | "videos" | "movies" | "steam"
         | "models" | ".ollama" | ".lmstudio" | "games" | "wineprefix" => {
@@ -134,7 +147,11 @@ pub fn category_of_name(name: &str) -> Option<Category> {
         | "obsidian" | "public" | "templates" => Category::Documents,
         ".cache" | "cache" | "caches" | ".ccache" | ".sccache" | "_cacache"
         | "__pycache__" | "node_modules" | "trash" | ".trash" | "tmp"
-        | ".tmp" => Category::Cache,
+        | ".tmp" | "deriveddata" | "ios devicesupport"
+        | "watchos devicesupport"
+        // Windows: see `reclaim_of`.
+        | "temp" | "$recycle.bin" | "npm-cache" | "v3-cache" | "inetcache"
+        | "d3dscache" | "dxcache" | "glcache" | "crashdumps" => Category::Cache,
         _ => return None,
     };
     Some(category)
@@ -149,21 +166,33 @@ pub fn reclaim_of(
 ) -> Option<Reclaim> {
     let lower = name.to_ascii_lowercase();
     let reclaim = match lower.as_str() {
-        ".cache" | "cache" | "caches" | ".ccache" | ".sccache" | "_cacache" => {
-            Reclaim::Regenerable
-        }
+        ".cache" | "cache" | "caches" | ".ccache" | ".sccache" | "_cacache"
+        // Windows' own caches in AppData\Local: npm's, NuGet's downloads,
+        // the browser engine's, and compiled shaders, Direct3D's and the
+        // graphics driver's, all rebuilt as they are needed.
+        | "npm-cache" | "v3-cache" | "inetcache" | "d3dscache" | "dxcache"
+        | "glcache"
+        // Symbols Xcode copies off a device it meets, and copies again the
+        // next time that device is plugged in.
+        | "ios devicesupport" | "watchos devicesupport" => Reclaim::Regenerable,
         ".stversions" => Reclaim::SyncHistory,
         ".pnpm-store" | "pnpm" => Reclaim::PackageStore,
         "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".ruff_cache"
-        | ".next" | ".turbo" | ".parcel-cache" => Reclaim::BuildOutput,
+        | ".next" | ".turbo" | ".parcel-cache"
+        // Xcode's build products and indexes, rebuilt on the next build.
+        | "deriveddata" => Reclaim::BuildOutput,
+        // ~/Library/Logs, told apart from a project's logs by its neighbour.
+        "logs" if has_sibling("Application Support") => Reclaim::Temporary,
         // Too common to trust alone: only a build directory beside a manifest.
         "target" if has_sibling("Cargo.toml") => Reclaim::BuildOutput,
         "node_modules" if has_sibling("package.json") => Reclaim::Reinstallable,
         // Layers and snapshots are only disposable inside sandbox state.
         "layers" if parent == Category::AgentScratch => Reclaim::SandboxLayers,
         "snapshots" if parent == Category::AgentScratch => Reclaim::Snapshots,
-        "trash" | ".trash" => Reclaim::Trash,
-        "tmp" | ".tmp" => Reclaim::Temporary,
+        "trash" | ".trash" | "$recycle.bin" => Reclaim::Trash,
+        // `Temp` is where Windows puts temporary files, in AppData\Local;
+        // `CrashDumps` beside it holds dumps of programs that crashed.
+        "tmp" | ".tmp" | "temp" | "crashdumps" => Reclaim::Temporary,
         _ => return None,
     };
     Some(reclaim)
@@ -423,6 +452,67 @@ mod tests {
             reclaim_of("snapshots", Category::Documents, |_| false),
             None
         );
+    }
+
+    #[test]
+    fn macos_developer_leftovers_are_reclaimable_and_its_risks_are_not() {
+        let none = |_: &str| false;
+        assert_eq!(
+            reclaim_of("DerivedData", Category::Toolchain, none),
+            Some(Reclaim::BuildOutput)
+        );
+        assert_eq!(
+            reclaim_of("iOS DeviceSupport", Category::Toolchain, none),
+            Some(Reclaim::Regenerable)
+        );
+        let library = |name: &str| name == "Application Support";
+        assert_eq!(
+            reclaim_of("Logs", Category::Other, library),
+            Some(Reclaim::Temporary)
+        );
+        assert_eq!(reclaim_of("logs", Category::Code, none), None);
+        // Big, but not safe to offer: Archives hold the symbols crash
+        // reports need, and Backup is an iPhone's only backup.
+        assert_eq!(reclaim_of("Archives", Category::Toolchain, none), None);
+        assert_eq!(reclaim_of("Backup", Category::Other, none), None);
+        assert_eq!(
+            category_of_name("Mobile Documents"),
+            Some(Category::Synced)
+        );
+        // ~/Developer holds a user's projects, not a toolchain.
+        assert_eq!(category_of_name("Developer"), None);
+        assert_eq!(category_of_name("Xcode"), Some(Category::Toolchain));
+    }
+
+    #[test]
+    fn windows_caches_and_sync_folders_are_recognized() {
+        let none = |_: &str| false;
+        for (name, reclaim) in [
+            ("Temp", Reclaim::Temporary),
+            ("CrashDumps", Reclaim::Temporary),
+            ("npm-cache", Reclaim::Regenerable),
+            ("v3-cache", Reclaim::Regenerable),
+            ("INetCache", Reclaim::Regenerable),
+            ("D3DSCache", Reclaim::Regenerable),
+            ("DXCache", Reclaim::Regenerable),
+            ("$Recycle.Bin", Reclaim::Trash),
+        ] {
+            assert_eq!(
+                reclaim_of(name, Category::Other, none),
+                Some(reclaim),
+                "{name}"
+            );
+            assert_eq!(category_of_name(name), Some(Category::Cache), "{name}");
+        }
+        for name in ["OneDrive - Contoso", "Dropbox (Contoso)", "iCloudDrive"] {
+            assert_eq!(
+                category_of_name(name),
+                Some(Category::Synced),
+                "{name}"
+            );
+        }
+        assert_eq!(category_of_name(".nuget"), Some(Category::Toolchain));
+        assert_eq!(category_of_name("OneDriveSetup"), None);
     }
 
     #[test]

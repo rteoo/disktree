@@ -26,8 +26,8 @@ use disktree_core::treemap::{
 };
 use gpui_kit::{
     Context, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size,
-    Window, px, size,
+    MouseMoveEvent, NavigationDirection, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, Size, Window, px, size,
 };
 use gpui_omarchy::Status;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -297,6 +297,20 @@ struct LayoutKey {
     filter: u64,
 }
 
+/// Directories left behind and come back from, for `<` and `>`.
+///
+/// Kept as absolute paths, not crumbs: a re-scan or a widening renumbers the
+/// tree, and crumbs would then silently point at other directories.
+#[derive(Clone, Debug, Default)]
+pub struct History {
+    pub back: Vec<PathBuf>,
+    pub forward: Vec<PathBuf>,
+}
+
+/// How many directories back is remembered. Far more than anyone clicks
+/// through, and small enough that pruning after a scan costs nothing.
+const HISTORY_DEPTH: usize = 100;
+
 /// Result of the removal run, summarised for the final screen.
 #[derive(Clone, Debug, Default)]
 pub struct RunSummary {
@@ -323,6 +337,10 @@ pub struct Disktree {
     pub crumbs: Vec<usize>,
     pub selected: Option<Vec<usize>>,
     pub hovered: Option<Vec<usize>>,
+    pub history: History,
+    /// The history button under the pointer, `true` for `<`: its card is
+    /// drawn below it for as long as it is.
+    pub history_hover: Option<bool>,
     /// The pointer moved more recently than the keyboard navigated. Then the
     /// tile under the pointer is what Space, X and Enter act on; after an
     /// arrow or Tab it is the keyboard selection again.
@@ -350,6 +368,8 @@ pub struct Disktree {
     /// Focus to move on the next occasion a window is in hand. Key handling
     /// has no window, and opening or closing the dialog must move focus.
     pub focus_request: Option<FocusTarget>,
+    /// What the titlebar says, so it is only set when it changes.
+    window_title: String,
     /// The window's `rem` in pixels, read each frame. The mosaic is laid out
     /// in pixels, so its header band and label thresholds are scaled by this
     /// to follow interface zoom like the rest of the interface.
@@ -393,8 +413,11 @@ pub struct Disktree {
     git_pending: FxHashSet<PathBuf>,
     /// The device the scanned volume is mounted from.
     pub device: Option<String>,
-    /// The top of the disk the home directory lives on: what "Whole disk"
-    /// scans.
+    /// Whether macOS lets this process read everything: asked once, since a
+    /// grant only takes effect after a relaunch. `None` off macOS.
+    pub full_disk_access: Option<bool>,
+    /// The top of the disk the scanned root lives on: what "Whole disk"
+    /// scans. Follows the root when a folder is opened.
     pub disk_root: Option<PathBuf>,
     /// The side panel's width, in rem; dragged from its left edge.
     pub panel_rems: f32,
@@ -414,7 +437,7 @@ impl Disktree {
         depth: u32,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let home = disktree_core::home_dir();
+        let home = std::env::home_dir();
         let space = space_info(&root_path).ok();
         let trash_backend = detect_trash_backend();
         let mut tree = Self {
@@ -430,6 +453,8 @@ impl Disktree {
             crumbs: Vec::new(),
             selected: None,
             hovered: None,
+            history: History::default(),
+            history_hover: None,
             pointer_active: false,
             view: View::default(),
             transition: None,
@@ -453,6 +478,7 @@ impl Disktree {
             confirm_open: false,
             confirm_focus: cx.focus_handle(),
             focus_request: None,
+            window_title: String::new(),
             rem: crate::ui::BASE_REM,
             run: None,
             run_epoch: 0,
@@ -478,6 +504,7 @@ impl Disktree {
             git: FxHashMap::default(),
             git_pending: FxHashSet::default(),
             device: None,
+            full_disk_access: None,
             disk_root: None,
             panel_rems: PANEL_REMS,
             scan_started: None,
@@ -486,11 +513,14 @@ impl Disktree {
             scanned_at: now_seconds(),
         };
         tree.device = device_for(&tree.root_path);
-        tree.disk_root = tree
+        tree.full_disk_access = tree
             .home
             .as_deref()
-            .or(Some(tree.root_path.as_path()))
-            .and_then(volume_root_for);
+            .and_then(disktree_core::access::full_disk_access);
+        // The disk of what is on screen, as `set_root` keeps it: `disktree
+        // /Volumes/Ext` then `g` measures that drive, like opening it with ⌘O.
+        tree.disk_root = volume_root_for(&tree.root_path);
+        disktree_core::removal::prime_mount_points();
         tree.start_scan(cx);
         Self::start_space_ticker(cx);
         tree
@@ -523,6 +553,10 @@ impl Disktree {
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<'_, Self>) {
         self.space = space_info(&root).ok();
         self.device = device_for(&root);
+        // "Whole disk" means the disk of what is on screen, which a new root
+        // can change: an external drive has its own.
+        self.disk_root =
+            volume_root_for(&root).or_else(|| self.disk_root.take());
         self.root_path = root;
         self.screen = Screen::Explore;
         self.start_scan(cx);
@@ -551,6 +585,7 @@ impl Disktree {
         self.scan_started = Some(Instant::now());
         self.scan_elapsed = None;
         self.scan_root.clone_from(&above);
+        self.remember();
         let known = Known {
             path: self.root_path.clone(),
             tree,
@@ -632,6 +667,10 @@ impl Disktree {
         let epoch = self.scan_epoch;
         self.progress = ScanSnapshot::default();
         self.scan_error = None;
+        // A new scan starts at its root; where it was is one `<` away.
+        if !self.crumbs.is_empty() {
+            self.remember();
+        }
         self.tree = None;
         self.crumbs.clear();
         self.selected = None;
@@ -718,6 +757,7 @@ impl Disktree {
                     });
                 }
                 self.keep_selection_valid();
+                self.prune_history();
                 self.select_largest(cx);
             }
             Err(error) => self.scan_error = Some(error.to_string()),
@@ -988,6 +1028,7 @@ impl Disktree {
         if !node.is_dir() || node.children.is_empty() {
             return;
         }
+        self.remember();
         self.selected = Some(target.clone());
         self.crumbs = target;
         self.forget_hover();
@@ -1040,18 +1081,27 @@ impl Disktree {
     /// Ascend to the parent directory, keeping the directory we came from in
     /// view so the motion reads as zooming out.
     pub fn ascend(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(parent_crumbs) = self.parent_crumbs() else {
-            return;
-        };
+        if let Some(parent_crumbs) = self.parent_crumbs() {
+            self.ascend_to(parent_crumbs, cx);
+        }
+    }
+
+    /// Make `ancestor`, a directory above the current root, the root.
+    ///
+    /// The directory we leave shrinks back into its tile when that tile is
+    /// drawn at the new level; from further up it is too small to track, and
+    /// the new level simply lands.
+    fn ascend_to(&mut self, ancestor: Vec<usize>, cx: &mut Context<'_, Self>) {
+        self.remember();
         // The region we are looking at now, and where it sits in the layout
         // we are going back to.
         let area = self.treemap_size.get();
         let child_crumbs = self.crumbs.clone();
         let src = self.view.visible_base(area);
-        self.crumbs.clone_from(&parent_crumbs);
+        self.crumbs.clone_from(&ancestor);
         self.forget_hover();
         self.cache = None;
-        self.selected = Some(parent_crumbs);
+        self.selected = Some(ancestor);
         self.view = View::IDENTITY;
         self.transition = self
             .tile_body(&child_crumbs)
@@ -1075,6 +1125,10 @@ impl Disktree {
     /// it lands immediately, the way selecting a folder does.
     pub fn go_to(&mut self, crumbs: Vec<usize>, cx: &mut Context<'_, Self>) {
         self.crumb_menu = None;
+        // A reveal in the directory on screen goes nowhere.
+        if crumbs != self.crumbs {
+            self.remember();
+        }
         self.crumbs.clone_from(&crumbs);
         self.selected = Some(crumbs);
         self.forget_hover();
@@ -1082,6 +1136,117 @@ impl Disktree {
         self.transition = None;
         self.cache = None;
         cx.notify();
+    }
+
+    /// Note the directory on screen as one to come back to, before leaving
+    /// it. A new departure ends whatever was ahead, as in a browser.
+    fn remember(&mut self) {
+        if self.tree.is_none() {
+            return;
+        }
+        let here = self.current_path();
+        if self.history.back.last() != Some(&here) {
+            self.history.back.push(here);
+        }
+        if self.history.back.len() > HISTORY_DEPTH {
+            self.history.back.remove(0);
+        }
+        self.history.forward.clear();
+    }
+
+    /// Drop what a new tree no longer holds: a removed directory, or one
+    /// outside a new root. What is left always resolves, so `<` and `>` are
+    /// enabled exactly when they would go somewhere.
+    fn prune_history(&mut self) {
+        let mut history = std::mem::take(&mut self.history);
+        history
+            .back
+            .retain(|path| self.crumbs_for_path(path).is_some());
+        history
+            .forward
+            .retain(|path| self.crumbs_for_path(path).is_some());
+        self.history = history;
+    }
+
+    /// Whether `<` would go anywhere: what drives its button's disabled state.
+    pub fn can_go_back(&self) -> bool {
+        self.history_target(true).is_some()
+    }
+
+    /// Whether `>` would go anywhere.
+    pub fn can_go_forward(&self) -> bool {
+        self.history_target(false).is_some()
+    }
+
+    /// `<`: the directory on screen before this one.
+    pub fn go_back(&mut self, cx: &mut Context<'_, Self>) {
+        self.step_history(true, cx);
+    }
+
+    /// `>`: undo a `<`.
+    pub fn go_forward(&mut self, cx: &mut Context<'_, Self>) {
+        self.step_history(false, cx);
+    }
+
+    /// Where `<` (or `>`) would go, and its place on that stack: the newest
+    /// entry that is somewhere else. An entry can be where we already are,
+    /// after a widening that was superseded; it is skipped rather than spend
+    /// a click on nothing. Every other entry resolves, being pruned whenever
+    /// a tree lands.
+    pub fn history_target(&self, back: bool) -> Option<(usize, Vec<usize>)> {
+        self.tree.as_ref()?;
+        let stack = if back {
+            &self.history.back
+        } else {
+            &self.history.forward
+        };
+        stack.iter().enumerate().rev().find_map(|(at, path)| {
+            self.crumbs_for_path(path)
+                .filter(|crumbs| *crumbs != self.crumbs)
+                .map(|crumbs| (at, crumbs))
+        })
+    }
+
+    fn step_history(&mut self, back: bool, cx: &mut Context<'_, Self>) {
+        let Some((at, target)) = self.history_target(back) else {
+            return;
+        };
+        let here = self.current_path();
+        let mut history = std::mem::take(&mut self.history);
+        let (from, to) = if back {
+            (&mut history.back, &mut history.forward)
+        } else {
+            (&mut history.forward, &mut history.back)
+        };
+        from.truncate(at);
+        to.push(here);
+        // The move is an ordinary one, animation and all; it records itself
+        // like any other, so the stacks are put back afterwards.
+        self.travel(target, cx);
+        self.history = history;
+        cx.notify();
+    }
+
+    /// Go to `target` with the motion that fits: grow into a directory
+    /// below, shrink back out to one above, or land on one beside.
+    fn travel(&mut self, target: Vec<usize>, cx: &mut Context<'_, Self>) {
+        let enterable = self
+            .node_at(&target)
+            .is_some_and(|node| node.is_dir() && !node.children.is_empty());
+        if target.len() > self.crumbs.len()
+            && target.starts_with(&self.crumbs)
+            && enterable
+        {
+            let from =
+                self.tile_body(&target).map(|rect| self.view.project(rect));
+            self.enter(target, from, cx);
+        } else if target.len() < self.crumbs.len()
+            && self.crumbs.starts_with(&target)
+        {
+            self.ascend_to(target, cx);
+        } else {
+            self.go_to(target, cx);
+        }
     }
 
     /// Show `crumbs` in its directory, selected: what a "worth a look" row
@@ -1940,16 +2105,140 @@ impl Disktree {
 
     // ── input ───────────────────────────────────────────────────────────
 
-    /// Handle a key press. Returns whether the directory on screen changed,
-    /// which is what keeps the window title honest.
+    /// Handle a key press.
     pub fn on_key_down(
         &mut self,
         event: &KeyDownEvent,
         cx: &mut Context<'_, Self>,
-    ) -> bool {
-        let before = self.crumbs.clone();
+    ) {
         self.dispatch_key(event, cx);
-        self.crumbs != before
+    }
+
+    /// Whether a menu command may replace the tree: where `r` would, not
+    /// behind the confirmation, and not under the review list or a removal
+    /// that is still running.
+    pub fn can_start_over(&self) -> bool {
+        self.screen == Screen::Explore && !self.confirm_open
+    }
+
+    /// Ask for a directory and scan it: an app opened from the Dock has no
+    /// command line to name one.
+    pub fn open_folder(cx: &Context<'_, Self>) {
+        let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Scan".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            // Canonical, like a root from the command line, so a later
+            // widening recognises this tree in the wider walk.
+            let path = path.canonicalize().unwrap_or(path);
+            // The panel does not block the window: the review list or a
+            // removal may have started while it was open.
+            let _ = this.update(cx, |this, cx| {
+                if this.can_start_over() {
+                    this.set_root(path, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Save what the plan would act on as a list of paths, one per line,
+    /// wherever the user chooses: for a script, or for later.
+    pub fn save_delete_list(&mut self, cx: &mut Context<'_, Self>) {
+        let plan = self.plan();
+        if plan.is_empty() {
+            self.notice = Some(("nothing to save".into(), Status::Warning));
+            cx.notify();
+            return;
+        }
+        let list = disktree_core::export::delete_list(&plan.targets);
+        let count = plan.targets.len();
+        let directory =
+            self.home.clone().unwrap_or_else(|| self.root_path.clone());
+        let chosen = cx
+            .prompt_for_new_path(&directory, Some("disktree-delete-list.txt"));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = chosen.await else {
+                return;
+            };
+            let notice = match std::fs::write(&path, list) {
+                Ok(()) => (
+                    format!(
+                        "saved {count} {} to {}",
+                        if count == 1 { "path" } else { "paths" },
+                        path.display()
+                    ),
+                    Status::Success,
+                ),
+                Err(error) => (
+                    format!("could not save {}: {error}", path.display()),
+                    Status::Error,
+                ),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.notice = Some(notice);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Copy instructions for a coding agent to free the space by removing
+    /// what the plan would act on, after checking each path.
+    pub fn copy_agent_prompt(&mut self, cx: &mut Context<'_, Self>) {
+        let plan = self.plan();
+        if plan.is_empty() {
+            self.notice = Some(("nothing to copy".into(), Status::Warning));
+            cx.notify();
+            return;
+        }
+        let prompt = disktree_core::export::agent_prompt(
+            &plan.targets,
+            &self.root_path,
+            self.space,
+        );
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(prompt));
+        let count = plan.targets.len();
+        self.notice = Some((
+            format!(
+                "copied a prompt for your agent: {count} {}, {}",
+                if count == 1 { "path" } else { "paths" },
+                disktree_core::size::human_bytes(plan.bytes())
+            ),
+            Status::Success,
+        ));
+        cx.notify();
+    }
+
+    /// Show the tile a key acts on in Finder (or the file manager), selected.
+    pub fn reveal_target(&mut self, cx: &mut Context<'_, Self>) {
+        let crumbs =
+            self.action_target().unwrap_or_else(|| self.crumbs.clone());
+        let Some(path) = self.path_at(&crumbs) else {
+            return;
+        };
+        // GPUI's reveal cannot report failure, so check what it can't.
+        if std::fs::symlink_metadata(&path).is_err() {
+            self.notice = Some((
+                format!(
+                    "{} is no longer on disk",
+                    crate::marks::display_path(&path, self.home.as_deref())
+                ),
+                Status::Warning,
+            ));
+            cx.notify();
+            return;
+        }
+        cx.reveal_path(&path);
     }
 
     /// Every binding, in reading order of the hint bar, so the keys and the
@@ -1962,20 +2251,19 @@ impl Disktree {
         let key = event.keystroke.key.as_str();
         let control = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
-
-        // On macOS the platform modifier is Command. Keep the app's single-key
-        // actions from swallowing native shortcuts such as Command-P.
-        #[cfg(target_os = "macos")]
-        if event.keystroke.modifiers.platform {
-            if key == "q" {
-                cx.quit();
-            }
-            return;
-        }
+        let alt = event.keystroke.modifiers.alt;
 
         // The alert dialog owns Enter and Escape while it is open; a key that
         // bubbles up to here must not also act on the screen behind it.
         if self.confirm_open {
+            return;
+        }
+
+        // ⌘ chords belong to the menu bar (⌘Q, ⌘W, ⌘R) or to the system.
+        // Read as plain letters they would act twice or by surprise: ⌘D
+        // would re-scan with apparent sizes, ⌘H would hide *and* toggle.
+        // Zoom (⌘= ⌘- ⌘0) is handled before this, with a window in hand.
+        if event.keystroke.modifiers.platform {
             return;
         }
 
@@ -2022,6 +2310,9 @@ impl Disktree {
         }
 
         match self.screen {
+            // Alt-arrows are history in every browser and file manager.
+            Screen::Explore if alt && key == "left" => self.go_back(cx),
+            Screen::Explore if alt && key == "right" => self.go_forward(cx),
             Screen::Explore => self.on_explore_key(key, control, shift, cx),
             Screen::Review => self.on_review_key(key, cx),
             Screen::Running => {
@@ -2151,6 +2442,7 @@ impl Disktree {
                 self.show_selection = !self.show_selection;
                 cx.notify();
             }
+            "o" if !control => self.reveal_target(cx),
             "?" => {
                 self.show_help = true;
                 cx.notify();
@@ -2176,6 +2468,8 @@ impl Disktree {
                 self.removal_mode = RemovalMode::Trash;
                 cx.notify();
             }
+            "s" => self.save_delete_list(cx),
+            "a" => self.copy_agent_prompt(cx),
             "?" => {
                 self.show_help = true;
                 cx.notify();
@@ -2280,6 +2574,12 @@ impl Disktree {
                 if let Some(crumbs) = crumbs {
                     self.toggle_mark(&crumbs, cx);
                 }
+            }
+            MouseButton::Navigate(NavigationDirection::Back) => {
+                self.go_back(cx);
+            }
+            MouseButton::Navigate(NavigationDirection::Forward) => {
+                self.go_forward(cx);
             }
             _ => {}
         }
@@ -2467,6 +2767,19 @@ impl Render for Disktree {
     ) -> impl gpui_kit::IntoElement {
         self.rem = window.rem_size().as_f32();
         self.tick_transition(window);
+        // The titlebar names the directory on screen, however it got there:
+        // a key, a click, a rescan or a folder chosen from the menu.
+        let title = format!(
+            "disktree · {}",
+            crate::marks::display_path(
+                &self.current_path(),
+                self.home.as_deref()
+            )
+        );
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
         crate::views::root(self, window, cx)
     }
 }
