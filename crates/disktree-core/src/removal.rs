@@ -156,19 +156,29 @@ const SYSTEM_TREES: [&str; 14] = [
 const MACOS_SYSTEM_TREES: [&str; 5] =
     ["/Applications", "/Library", "/System", "/Users", "/private"];
 
+#[cfg(target_os = "macos")]
+fn macos_logical_path(path: &Path) -> PathBuf {
+    path.strip_prefix("/System/Volumes/Data")
+        .map_or_else(|_| path.to_path_buf(), |rest| Path::new("/").join(rest))
+}
+
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
 fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
     // A whole-Data-volume scan reaches the same files through their physical
     // mount path; compare its logical root paths with the normal home path.
     #[cfg(target_os = "macos")]
-    let logical = path
-        .strip_prefix("/System/Volumes/Data")
-        .map_or_else(|_| path.to_path_buf(), |rest| Path::new("/").join(rest));
+    let logical = macos_logical_path(path);
     #[cfg(target_os = "macos")]
     let path = logical.as_path();
 
-    if home.is_some_and(|home| path.starts_with(normalize(home))) {
+    #[cfg(target_os = "macos")]
+    let in_home = home.is_some_and(|home| {
+        path.starts_with(macos_logical_path(&normalize(home)))
+    });
+    #[cfg(not(target_os = "macos"))]
+    let in_home = home.is_some_and(|home| path.starts_with(normalize(home)));
+    if in_home {
         return None;
     }
     let linux_tree = SYSTEM_TREES
@@ -197,7 +207,14 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
     if path == root {
         return Some("the scanned root cannot be removed".into());
     }
-    if home.is_some_and(|home| path == normalize(home)) {
+    #[cfg(target_os = "macos")]
+    let is_home = home.is_some_and(|home| {
+        path == normalize(home)
+            || macos_logical_path(path) == macos_logical_path(&normalize(home))
+    });
+    #[cfg(not(target_os = "macos"))]
+    let is_home = home.is_some_and(|home| path == normalize(home));
+    if is_home {
         return Some("the home directory cannot be removed".into());
     }
     if !path.starts_with(root) {
@@ -710,6 +727,10 @@ mod tests {
             None
         );
         assert_eq!(detect_trash_backend(), TrashBackend::Unavailable);
+        let physical_home = Path::new("/System/Volumes/Data/Users/example");
+        let root = Path::new("/System/Volumes/Data");
+        let reason = refuse(physical_home, root, Some(home));
+        assert!(reason.is_some_and(|reason| reason.contains("home")));
     }
 
     #[cfg(target_os = "macos")]
