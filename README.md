@@ -17,23 +17,26 @@ your theme and behaves like the rest of the desktop.
 
 ## Install
 
-The original project's latest release currently has a Linux archive. The
-macOS and Windows release jobs are merged here, but no tagged desktop archives
-have been published from this fork yet. For macOS and Windows, build this
-checkout from source until a release lists the archive for your platform.
+Download the Linux, macOS or Windows archive from
+[this fork's latest release](https://github.com/rteoo/disktree/releases/latest).
+The `v0.9.1` release has all three, each with a `.sha256` checksum.
+The [original project's latest release](https://github.com/tobi/disktree/releases/latest)
+remains available for Omarchy Linux.
 
 ### Linux (Omarchy)
 
-Download `disktree-*-x86_64-linux.tar.gz` from the
-[latest release](https://github.com/tobi/disktree/releases/latest), unpack
-it, and run `./install.sh` inside (or just copy `disktree` onto your
-`PATH`). Or build it:
+Download `disktree-*-x86_64-linux.tar.gz` from this fork's release above,
+unpack it, and run `./install.sh` inside (or just copy `disktree` onto your
+`PATH`). Or build this fork:
 
 ```sh
-git clone https://github.com/tobi/disktree
+git clone https://github.com/rteoo/disktree
 cd disktree
 make install
 ```
+
+For the original Linux source instead, use
+`git clone https://github.com/tobi/disktree`.
 
 `make install` builds a release binary and puts three things under `~/.local`
 (no root needed):
@@ -52,10 +55,10 @@ session with a GPU that GPUI can drive (Vulkan).
 
 ### macOS (Apple Silicon)
 
-When a release includes `disktree-*-aarch64-macos.tar.gz`, unpack it, enter
-the extracted directory and run `./disktree`. The archive contains the binary,
-README and license, with no `.app` bundle or installer. To build from source,
-use Rust 1.97 or newer:
+Download `disktree-*-aarch64-macos.tar.gz` from this fork's release above,
+unpack it, enter the extracted directory and run `./disktree`. The archive
+contains the binary, README and license, with no `.app` bundle or installer.
+To build from source, use Rust 1.97 or newer:
 
 ```sh
 cargo build --release --locked -p disktree-app
@@ -68,9 +71,10 @@ and skip APFS Data firmlinks.
 
 ### Windows (x86_64)
 
-When a release includes `disktree-*-x86_64-windows.zip`, extract it, enter the
-extracted directory and run `disktree.exe`. The ZIP contains the binary, README
-and license, with no installer. To build from source, use Rust 1.97 or newer:
+Download `disktree-*-x86_64-windows.zip` from this fork's release above,
+extract it, enter the extracted directory and run `disktree.exe`. The ZIP
+contains the binary, README and license, with no installer. To build from
+source, use Rust 1.97 or newer:
 
 ```powershell
 cargo build --release --locked -p disktree-app
