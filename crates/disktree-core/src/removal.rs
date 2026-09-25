@@ -153,12 +153,27 @@ const SYSTEM_TREES: [&str; 14] = [
 ];
 
 #[cfg(target_os = "macos")]
-const MACOS_SYSTEM_TREES: [&str; 4] =
-    ["/Applications", "/Library", "/System", "/private"];
+const MACOS_SYSTEM_TREES: [&str; 5] = [
+    "/Applications",
+    "/Library",
+    "/System",
+    "/Users",
+    "/private",
+];
 
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
 fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
+    // A whole-Data-volume scan reaches the same files through their physical
+    // mount path; compare its logical root paths with the normal home path.
+    #[cfg(target_os = "macos")]
+    let logical = path.strip_prefix("/System/Volumes/Data").map_or_else(
+        |_| path.to_path_buf(),
+        |rest| Path::new("/").join(rest),
+    );
+    #[cfg(target_os = "macos")]
+    let path = logical.as_path();
+
     if home.is_some_and(|home| path.starts_with(normalize(home))) {
         return None;
     }
@@ -210,7 +225,7 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
 
 /// Whether `path` sits on a different device than its parent, i.e. is a
 /// mount point. Descending into one would delete data the user never marked.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn is_mount_point(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     let Ok(meta) = fs::symlink_metadata(path) else {
@@ -227,6 +242,30 @@ pub fn is_mount_point(path: &Path) -> bool {
         // A directory whose parent cannot be stat'ed is not worth the risk.
         Err(_) => true,
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn is_mount_point(path: &Path) -> bool {
+    // APFS can report the same device number on both sides of a mount.
+    crate::space::macos_mount_points().is_none_or(|mounts| {
+        mounts.iter().any(|point| point == path) || device_boundary(path)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn device_boundary(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return true;
+    };
+    fs::symlink_metadata(parent).is_err_or(|other| other.dev() != meta.dev())
 }
 
 #[cfg(not(unix))]
@@ -312,6 +351,13 @@ impl TrashBackend {
 }
 
 /// Detect the best available trash backend for this machine.
+#[cfg(target_os = "macos")]
+pub fn detect_trash_backend() -> TrashBackend {
+    // The XDG fallback is not Finder Trash.
+    TrashBackend::Unavailable
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn detect_trash_backend() -> TrashBackend {
     if which("trash-put") {
         TrashBackend::TrashPut
@@ -324,6 +370,7 @@ pub fn detect_trash_backend() -> TrashBackend {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn which(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -474,17 +521,24 @@ pub fn remove_permanently(path: &Path) -> io::Result<()> {
 /// a mount point after earlier siblings have already been removed.
 #[cfg(target_os = "macos")]
 fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
+    let mounts = crate::space::macos_mount_points()
+        .ok_or_else(|| io::Error::other("cannot read macOS mount table"))?;
+    ensure_no_nested_mounts_in(path, &mounts)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_no_nested_mounts_in(path: &Path, mounts: &[PathBuf]) -> io::Result<()> {
+    if mounts.iter().any(|point| point == path) || device_boundary(path) {
+        return Err(io::Error::other(format!(
+            "refusing to remove mounted filesystem {}",
+            path.display()
+        )));
+    }
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let child = entry.path();
-        if is_mount_point(&child) {
-            return Err(io::Error::other(format!(
-                "refusing to remove mounted filesystem {}",
-                child.display()
-            )));
-        }
         if fs::symlink_metadata(&child)?.is_dir() {
-            ensure_no_nested_mounts(&child)?;
+            ensure_no_nested_mounts_in(&child, mounts)?;
         }
     }
     Ok(())
@@ -642,11 +696,30 @@ mod tests {
             "/Applications/Notes.app",
             "/Library/Preferences",
             "/System/Library",
+            "/Users/other/Documents",
             "/private/etc",
         ] {
             assert!(system_tree(Path::new(path), Some(home)).is_some());
         }
         assert_eq!(system_tree(home, Some(home)), None);
+        assert_eq!(
+            system_tree(
+                Path::new("/System/Volumes/Data/Users/example/Documents"),
+                Some(home)
+            ),
+            None
+        );
+        assert_eq!(detect_trash_backend(), TrashBackend::Unavailable);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nested_mount_refuses_the_whole_removal_before_touching_files() {
+        let temp = tree();
+        let nested = temp.path().join("a/b");
+        let error = ensure_no_nested_mounts_in(temp.path(), &[nested]);
+        assert!(error.is_err());
+        assert!(temp.path().join("a/one.bin").exists());
     }
 
     fn target(path: &Path, bytes: u64) -> Target {
@@ -931,6 +1004,7 @@ mod tests {
         assert!(error.to_string().contains("no trash here"), "{error}");
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn detection_prefers_a_tool_this_machine_has() {
         let backend = detect_trash_backend();

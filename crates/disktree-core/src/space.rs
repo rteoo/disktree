@@ -78,7 +78,7 @@ pub fn device_for(path: &Path) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 pub fn device_for(path: &Path) -> Option<String> {
-    volume_root_for(path).map(|root| root.display().to_string())
+    macos_mount_for(path).map(|mount| mount.source)
 }
 
 /// [`device_for`] over a given mount table, for testing.
@@ -199,24 +199,12 @@ pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
     volume_root(&parse_mounts(&table), &path)
 }
 
-/// On macOS, walk to the highest ancestor on the same mounted filesystem.
-/// APFS can mount a separate Data volume, so `/` is not always this volume.
+/// APFS firmlinks make `/Users` look like it lives under `/` while `df`
+/// reports its real Data volume at `/System/Volumes/Data`. Device numbers and
+/// path ancestry alone cannot identify the right root.
 #[cfg(target_os = "macos")]
 pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let mut root = path.canonicalize().ok()?;
-    let device = std::fs::metadata(&root).ok()?.dev();
-    while let Some(parent) = root.parent() {
-        let Ok(parent_meta) = std::fs::metadata(parent) else {
-            break;
-        };
-        if parent_meta.dev() != device {
-            break;
-        }
-        root = parent.to_path_buf();
-    }
-    Some(root)
+    macos_mount_for(path).map(|mount| mount.point)
 }
 
 /// [`foreign_mounts`] for this machine; `None` when the mount table cannot
@@ -227,10 +215,80 @@ pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
     Some(foreign_mounts(&parse_mounts(&table), root))
 }
 
-/// macOS does not have `/proc/self/mounts`; the scanner compares `st_dev`.
+/// macOS does not have `/proc/self/mounts`; parse its native mount table.
 #[cfg(target_os = "macos")]
-pub fn foreign_mounts_for(_root: &Path) -> Option<Vec<PathBuf>> {
-    None
+pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
+    Some(
+        macos_mounts()?
+            .into_iter()
+            .filter(|mount| mount.point != root && mount.point.starts_with(root))
+            .map(|mount| mount.point)
+            .collect(),
+    )
+}
+
+/// Mount paths used by the macOS removal guard, including APFS volumes that
+/// report the same `st_dev` as their parent.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_mount_points() -> Option<Vec<PathBuf>> {
+    Some(macos_mounts()?.into_iter().map(|mount| mount.point).collect())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mount_for(path: &Path) -> Option<Mount> {
+    let mounts = macos_mounts()?;
+    let output = std::process::Command::new("/bin/df")
+        .arg("-P")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let report = String::from_utf8(output.stdout).ok()?;
+    let line = report.lines().nth(1)?;
+    mount_from_df_line(&mounts, line).cloned()
+}
+
+#[cfg(target_os = "macos")]
+fn mount_from_df_line<'a>(mounts: &'a [Mount], line: &str) -> Option<&'a Mount> {
+    let source = line.split_whitespace().next()?;
+    mounts
+        .iter()
+        .filter(|mount| {
+            mount.source == source
+                && line.trim_end().ends_with(&*mount.point.to_string_lossy())
+        })
+        .max_by_key(|mount| mount.point.as_os_str().len())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mounts() -> Option<Vec<Mount>> {
+    let output = std::process::Command::new("/sbin/mount").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mounts = parse_macos_mounts(&String::from_utf8(output.stdout).ok()?);
+    (!mounts.is_empty()).then_some(mounts)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_mounts(table: &str) -> Vec<Mount> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let (source, rest) = line.rsplit_once(" on ")?;
+            let (point, details) = rest.rsplit_once(" (")?;
+            let options = details.strip_suffix(')')?;
+            let fstype = options.split(',').next()?.to_string();
+            Some(Mount {
+                source: source.to_string(),
+                point: PathBuf::from(point),
+                fstype,
+                options: options.to_string(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -239,18 +297,27 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_volume_root_is_an_ancestor_on_the_same_device() {
-        use std::os::unix::fs::MetadataExt as _;
-
+    fn macos_volume_root_matches_the_reported_mount() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().canonicalize().expect("canonical path");
-        let root = volume_root_for(&path).expect("volume root");
-        assert!(path.starts_with(&root));
+        let root = volume_root_for(temp.path()).expect("volume root");
+        assert!(root.is_absolute());
+        assert!(root.is_dir());
         assert_eq!(
-            std::fs::metadata(&path).expect("path metadata").dev(),
-            std::fs::metadata(&root).expect("root metadata").dev()
+            device_for(temp.path()),
+            macos_mount_for(temp.path()).map(|mount| mount.source)
         );
-        assert_eq!(foreign_mounts_for(&root), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_df_selects_the_data_volume_behind_a_firmlink() {
+        let mounts = parse_macos_mounts(
+            "/dev/disk3s1s1 on / (apfs, sealed, read-only)\n\
+             /dev/disk3s5 on /System/Volumes/Data (apfs, root data)\n",
+        );
+        let line = "/dev/disk3s5 478724992 344216312 72645488 83% /System/Volumes/Data";
+        let mount = mount_from_df_line(&mounts, line).expect("Data mount");
+        assert_eq!(mount.point, Path::new("/System/Volumes/Data"));
     }
 
     const OMARCHY: &str = "\
