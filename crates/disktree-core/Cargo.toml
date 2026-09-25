@@ -15,5 +15,8 @@ rayon = { workspace = true }
 rustix = { version = "1.1", features = ["fs"] }
 rustc-hash = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+trash = "5.2.9"
+
 [dev-dependencies]
 tempfile = "3"
