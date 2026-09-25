@@ -322,7 +322,9 @@ impl WalkContext {
             const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
             match fs::symlink_metadata(&path) {
                 Ok(meta)
-                    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 =>
+                    if meta.file_attributes()
+                        & FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0 =>
                 {
                     // Junctions can point into another volume or back to an
                     // ancestor. Show them as links but never descend.
