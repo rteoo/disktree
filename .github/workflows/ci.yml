@@ -43,3 +43,28 @@ jobs:
 
       - name: Test
         run: cargo xtask test
+
+  macos:
+    name: macOS lint, test, and build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint
+        run: cargo xtask lint
+
+      - name: Test
+        run: cargo xtask test
+
+      - name: Build
+        run: cargo build --release --locked -p disktree-app
+
+      - name: Smoke test binary
+        run: target/release/disktree --help

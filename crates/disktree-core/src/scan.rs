@@ -481,7 +481,12 @@ fn scan_blocking(root: &Path, context: &Arc<WalkContext>) -> io::Result<Node> {
     if context.options.one_filesystem {
         *lock(&context.root_device) = Some(device_of(&root_meta));
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        if let Some(foreign) = crate::space::foreign_mounts_for(&root) {
+        let foreign = crate::space::foreign_mounts_for(&root);
+        #[cfg(target_os = "macos")]
+        let foreign = Some(foreign.ok_or_else(|| {
+            io::Error::other("cannot read macOS mount table")
+        })?);
+        if let Some(foreign) = foreign {
             let _ = context.foreign_mounts.set(foreign.into_iter().collect());
         }
     }

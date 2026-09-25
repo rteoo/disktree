@@ -175,10 +175,20 @@ fn parse_args() -> Result<Args> {
     );
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let root = match root {
-        _ if disk => home
-            .as_deref()
-            .and_then(disktree_core::space::volume_root_for)
-            .unwrap_or_else(|| PathBuf::from("/")),
+        _ if disk => {
+            #[cfg(target_os = "macos")]
+            {
+                home.as_deref()
+                    .and_then(disktree_core::space::volume_root_for)
+                    .context("cannot determine the home volume")?
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                home.as_deref()
+                    .and_then(disktree_core::space::volume_root_for)
+                    .unwrap_or_else(|| PathBuf::from("/"))
+            }
+        }
         Some(root) => root,
         None => std::env::var_os("HOME")
             .map(PathBuf::from)
