@@ -581,9 +581,7 @@ fn mount_points() -> Result<Arc<Vec<PathBuf>>, String> {
     cached_mounts(&cache)
 }
 
-fn cached_mounts(
-    cache: &MountCache,
-) -> Result<Arc<Vec<PathBuf>>, String> {
+fn cached_mounts(cache: &MountCache) -> Result<Arc<Vec<PathBuf>>, String> {
     cache
         .mounts
         .clone()
@@ -612,13 +610,17 @@ fn read_mount_points() -> io::Result<Vec<PathBuf>> {
             .stderr(std::process::Stdio::null())
             .output()?;
         if !output.status.success() {
-            return Err(io::Error::other("could not read the macOS mount table"));
+            return Err(io::Error::other(
+                "could not read the macOS mount table",
+            ));
         }
         let points = crate::space::parse_macos_mounts(
             &String::from_utf8_lossy(&output.stdout),
         );
         if points.is_empty() {
-            return Err(io::Error::other("could not parse the macOS mount table"));
+            return Err(io::Error::other(
+                "could not parse the macOS mount table",
+            ));
         }
         Ok(points.iter().map(|point| guard_key(point)).collect())
     }
@@ -676,16 +678,15 @@ fn parse_linux_mount_points(table: &str) -> io::Result<Vec<PathBuf>> {
                 index += 1;
                 continue;
             }
-            let escape = encoded.get(index + 1..index + 4).ok_or_else(|| {
-                io::Error::other(format!(
-                    "malformed mount path on line {}",
-                    line_number + 1
-                ))
-            })?;
+            let escape =
+                encoded.get(index + 1..index + 4).ok_or_else(|| {
+                    io::Error::other(format!(
+                        "malformed mount path on line {}",
+                        line_number + 1
+                    ))
+                })?;
             if escape.len() != 3
-                || escape.iter().any(|byte| {
-                    !(b'0'..=b'7').contains(byte)
-                })
+                || escape.iter().any(|byte| !(b'0'..=b'7').contains(byte))
             {
                 return Err(io::Error::other(format!(
                     "malformed mount path on line {}",
@@ -1869,10 +1870,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_mount_table_without_its_root_is_rejected() {
-        let error = parse_linux_mount_points(
-            "tmpfs /run tmpfs rw,nosuid,nodev 0 0\n",
-        )
-        .expect_err("incomplete mount table");
+        let error =
+            parse_linux_mount_points("tmpfs /run tmpfs rw,nosuid,nodev 0 0\n")
+                .expect_err("incomplete mount table");
         assert!(error.to_string().contains("mount table root"));
     }
 
@@ -2066,7 +2066,8 @@ mod tests {
         let planned = plan(&[target(&marked, 0)], root);
         assert!(planned.is_empty(), "nested mount is blocked in review");
         assert_eq!(planned.blocked.len(), 1);
-        let error = remove_permanently(&marked, root).expect_err("nested mount");
+        let error =
+            remove_permanently(&marked, root).expect_err("nested mount");
         assert!(error.to_string().contains("mounted filesystem"));
         assert!(keep.exists(), "mounted data was not touched");
         assert!(
@@ -2169,20 +2170,14 @@ mod tests {
         fs::create_dir_all(&escaped_root).expect("root");
         fs::create_dir_all(replacement_parent.join("root"))
             .expect("replacement root");
-        fs::write(
-            replacement_parent.join("root/marked.bin"),
-            b"keep",
-        )
-        .expect("write");
+        fs::write(replacement_parent.join("root/marked.bin"), b"keep")
+            .expect("write");
         fs::remove_dir_all(&original_parent).expect("remove scanned parent");
         link_dir(&replacement_parent, &original_parent);
 
         assert!(
-            remove_permanently(
-                &escaped_root.join("marked.bin"),
-                &escaped_root
-            )
-            .is_err(),
+            remove_permanently(&escaped_root.join("marked.bin"), &escaped_root)
+                .is_err(),
             "ancestor link refused"
         );
         assert!(
