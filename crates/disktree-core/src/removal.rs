@@ -628,10 +628,13 @@ fn read_mount_points() -> io::Result<Vec<PathBuf>> {
     }
     #[cfg(windows)]
     {
-        Ok(windows_mount_points()
-            .iter()
-            .map(|point| guard_key(point))
-            .collect())
+        let points = windows_mount_points();
+        if points.is_empty() {
+            return Err(io::Error::other(
+                "could not read the Windows volume mounts",
+            ));
+        }
+        Ok(points.iter().map(|point| guard_key(point)).collect())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -1295,7 +1298,10 @@ impl Volume {
         Ok(Self {
             #[cfg(any(not(target_os = "linux"), test))]
             device: rustix::fs::fstat(dir)?,
+            #[cfg(target_os = "linux")]
             mount: mount_id(dir)?,
+            #[cfg(not(target_os = "linux"))]
+            mount: mount_id(dir),
         })
     }
 
@@ -1333,8 +1339,8 @@ fn mount_id(dir: &std::os::fd::OwnedFd) -> io::Result<Option<u64>> {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-const fn mount_id(_dir: &std::os::fd::OwnedFd) -> io::Result<Option<u64>> {
-    Ok(None)
+const fn mount_id(_dir: &std::os::fd::OwnedFd) -> Option<u64> {
+    None
 }
 
 #[cfg(unix)]
@@ -2040,10 +2046,9 @@ mod tests {
                         .arg(&self.path)
                         .status()
                         .is_ok_and(|status| status.success())
+                    && let Some(temp) = self.temp.take()
                 {
-                    if let Some(temp) = self.temp.take() {
-                        std::mem::forget(temp);
-                    }
+                    std::mem::forget(temp);
                 }
             }
         }
