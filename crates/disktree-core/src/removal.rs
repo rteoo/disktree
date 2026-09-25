@@ -337,6 +337,13 @@ impl TrashBackend {
 }
 
 /// Detect the best available trash backend for this machine.
+#[cfg(windows)]
+pub fn detect_trash_backend() -> TrashBackend {
+    // The XDG fallback is not the Windows Recycle Bin.
+    TrashBackend::Unavailable
+}
+
+#[cfg(not(windows))]
 pub fn detect_trash_backend() -> TrashBackend {
     if which("trash-put") {
         TrashBackend::TrashPut
@@ -349,6 +356,7 @@ pub fn detect_trash_backend() -> TrashBackend {
     }
 }
 
+#[cfg(not(windows))]
 fn which(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -675,6 +683,7 @@ mod tests {
             assert!(system_tree(&path, Some(&home)).is_some(), "{name}");
         }
         assert_eq!(system_tree(&home.join("Downloads"), Some(&home)), None);
+        assert_eq!(detect_trash_backend(), TrashBackend::Unavailable);
     }
 
     fn target(path: &Path, bytes: u64) -> Target {
