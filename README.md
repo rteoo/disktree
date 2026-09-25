@@ -5,17 +5,24 @@
 Find what is filling a disk, mark what should go, and remove it — with the
 volume's free space in view the whole time.
 
-disktree is a treemap for Omarchy. It scans your home directory by default,
-draws every directory as a nested mosaic sized by what it really costs on disk,
-and lets you walk into it with the keyboard or the mouse. Mark as much as you
-like; nothing happens until you review the list and commit, and the permanent
-path always asks first.
+disktree is a treemap for Linux, macOS and Windows. It scans your home directory
+by default, draws every directory as a nested mosaic sized by what it costs on
+disk, and lets you walk into it with the keyboard or the mouse. Mark as much as
+you like; nothing happens until you review the list and commit, and the
+permanent path always asks first.
 
 Built with [GPUI](https://gpui-kit.com/) through
-[gpui-omarchy](https://github.com/huacnlee/gpui-omarchy), so it follows your
-Omarchy theme and behaves like the rest of the desktop.
+[gpui-omarchy](https://github.com/huacnlee/gpui-omarchy). On Omarchy it follows
+your theme and behaves like the rest of the desktop.
 
 ## Install
+
+The original project's latest release currently has a Linux archive. The
+macOS and Windows release jobs are merged here, but no tagged desktop archives
+have been published from this fork yet. For macOS and Windows, build this
+checkout from source until a release lists the archive for your platform.
+
+### Linux (Omarchy)
 
 Download `disktree-*-x86_64-linux.tar.gz` from the
 [latest release](https://github.com/tobi/disktree/releases/latest), unpack
@@ -40,25 +47,30 @@ make install
 `sudo make install PREFIX=/usr/local` installs system-wide; `make uninstall`
 removes exactly what was installed.
 
-You need Rust 1.97 or newer and a Wayland or X11 session with a GPU that GPUI
-can drive (Vulkan).
+Building from source needs Rust 1.97 or newer. Running needs a Wayland or X11
+session with a GPU that GPUI can drive (Vulkan).
 
-### macOS preview
+### macOS (Apple Silicon)
 
-Build the macOS binary with Rust 1.97 or newer:
+When a release includes `disktree-*-aarch64-macos.tar.gz`, unpack it, enter
+the extracted directory and run `./disktree`. The archive contains the binary,
+README and license, with no `.app` bundle or installer. To build from source,
+use Rust 1.97 or newer:
 
 ```sh
 cargo build --release --locked -p disktree-app
 ./target/release/disktree
 ```
 
-It scans your home directory by default; `--disk` scans its volume. The
-review screen can move marked paths to Finder Trash. Linux installation and
-runtime behavior remain as described above.
+It scans your home directory by default; `--disk` scans its volume. The review
+screen can move marked paths to Finder Trash. Scans stay on the selected volume
+and skip APFS Data firmlinks.
 
-### Windows preview
+### Windows (x86_64)
 
-Build the Windows binary with Rust 1.97 or newer:
+When a release includes `disktree-*-x86_64-windows.zip`, extract it, enter the
+extracted directory and run `disktree.exe`. The ZIP contains the binary, README
+and license, with no installer. To build from source, use Rust 1.97 or newer:
 
 ```powershell
 cargo build --release --locked -p disktree-app
@@ -66,10 +78,9 @@ cargo build --release --locked -p disktree-app
 ```
 
 It scans your user profile by default; `--disk` scans its drive. File sizes
-use allocated bytes, and marked paths can be moved to the Recycle Bin. Linux
-installation and runtime behavior remain as described above.
-Windows reparse points are excluded from scans; the `--follow-links` and
-`--cross-filesystems` options report that limit if requested.
+use allocated bytes, and marked paths can be moved to the Recycle Bin. Windows
+reparse points are excluded from scans and refused for removal; the
+`--follow-links` and `--cross-filesystems` options are unavailable on Windows.
 
 ## Use
 
@@ -82,7 +93,7 @@ disktree --help     # options: apparent size, follow links, skip hidden, …
 
 ### The screen
 
-- **Top:** the trail from `/`, then what is measured — **Size**, **Files** or
+- **Top:** the path trail, then what is measured — **Size**, **Files** or
   **Age**, **Hidden files**, **Apparent size**, and the depth drawn. In the
   tree a crumb goes there, and its ▾ lists its siblings, largest first with
   their share and size, to jump sideways (arrows and Enter work too). Above
@@ -135,11 +146,13 @@ going in; `0` resets.
 `c` (or **Review…**) opens the list of everything marked. Unmark anything
 there, then choose:
 
-- **Move to trash** — the default when a trash is available (`trash-put` from
-  trash-cli, then `gio trash`, then a built-in XDG trash). Recoverable until
+- **Move to trash** — the default when a trash is available. Linux tries
+  `trash-put` from trash-cli, then `gio trash`, then a built-in XDG trash;
+  macOS uses Finder Trash and Windows uses the Recycle Bin. Recoverable until
   the trash is emptied, so it commits directly.
-- **Delete permanently** — `rm -rf` semantics. It always asks first, in a dialog
-  that names what goes and how much comes back.
+- **Delete permanently** — recursively remove the marked paths (`rm -rf`
+  semantics on Linux). It always asks first, in a dialog that names what goes
+  and how much comes back.
 
 When it finishes, disktree scans again so the numbers on screen match the disk,
 and shows how much free space was actually gained.
@@ -175,12 +188,14 @@ commits, `esc` goes back.
 
 ## What it measures
 
-- **Disk usage** by default: `st_blocks × 512`, the number `du` reports and the
-  space that actually comes back when a file is deleted. Apparent size (what
-  `ls -l` shows) is one toggle away.
-- **Hardlinks once.** Two names for one inode cost one file.
+- **Disk usage** by default: allocated blocks on Linux and macOS
+  (`st_blocks × 512`), and allocated size reported by the filesystem on
+  Windows. Apparent file length is one toggle away. The final reclaimed space
+  is measured from the volume after removal.
+- **Hardlinks once.** Two names for one file identity cost one file.
 - **Hidden entries included**, because `~/.cache` is often the biggest thing in
-  a home directory. Symlinks are not followed.
+  a home directory. Windows hidden attributes are included too. Symlinks are
+  not followed.
 
 The scan follows [dust](https://github.com/bootandy/dust)'s approach: one rayon
 scope per root, a completion counter per directory so no directory is built
@@ -189,16 +204,18 @@ and removes duplicate hardlinks.
 
 ## The whole disk
 
-Click `/` (or any directory above the scanned root) in the trail, press
-`g`, run `disktree --disk`, or use the launcher's *Scan the whole disk*
-action. `g` and `--disk` scan the disk your home directory lives on — `/`
-on Omarchy.
+Click a directory above the scanned root in the trail, press `g`, or run
+`disktree --disk`. On Omarchy, the launcher also has a *Scan the whole disk*
+action. `g` and `--disk` scan the volume your home directory lives on: `/` on
+Omarchy, the home volume on macOS, and the containing drive on Windows.
 
 Widening is memoized: the tree already measured is handed to the wider walk
-and reused where it is reached, so going from `~` to `/` reads only what is
-outside `~` (on this machine, seconds instead of a full rescan). The current
+and reused where it is reached. On Linux, going from `~` to `/` reads only what
+is outside `~` (on this machine, seconds instead of a full rescan). The current
 view stays on screen until the wider tree lands, which then opens with the
 directory you came from selected. Going back down is just navigation.
+
+### Linux mount boundaries
 
 A scan stays on one volume, and a volume is the mount *source*, not the
 device number: btrfs gives each subvolume its own `st_dev`, so `/home`,
@@ -212,6 +229,12 @@ twice. `-X` crosses into everything.
 Without root, some system directories cannot be read; they are counted as
 unreadable in the top bar rather than guessed at.
 
+### macOS and Windows scan boundaries
+
+On macOS, the native mount table bounds the scan and APFS Data firmlinks are
+skipped. On Windows, scans stay on the containing volume and exclude reparse
+points. Windows does not offer `--follow-links` or `--cross-filesystems`.
+
 ## What it refuses to do
 
 The removal rules live in `crates/disktree-core/src/removal.rs`, and each one is
@@ -220,11 +243,13 @@ tested:
 - only paths under the scanned root can be removed;
 - the filesystem root, the scanned root and your home directory are refused;
 - a mount point is refused, since removing it would reach into another
-  filesystem;
-- system trees (`/usr`, `/etc`, `/boot`, `/var/lib`, `/nix/store`, …) are
-  refused even where permissions would allow it: packages own them, and
-  pacman, paccache or `journalctl --vacuum` are the tools;
-- a symlink is unlinked, never followed;
+  filesystem; Windows reparse points are refused too;
+- protected system trees are refused even where permissions would allow it.
+  On Linux these include `/usr`, `/etc`, `/boot`, `/var/lib` and `/nix/store`;
+  packages own them, and pacman, paccache or `journalctl --vacuum` are the
+  tools. macOS system directories and Windows-managed directories are also
+  protected;
+- on Unix, a symlink target is never followed during removal;
 - nothing is passed through a shell — a file called `-rf` is just a file.
 
 ## On Hyprland
@@ -239,6 +264,8 @@ windowrule = size 1400 900, class:^(disktree)$
 
 ## Develop
 
+The Makefile commands below target Linux and its desktop installation:
+
 ```sh
 make run      # release build, scanning $HOME
 make lint     # rustfmt --check, then clippy with every warning an error
@@ -251,6 +278,10 @@ errors, and every exception is written down with its reason in `Cargo.toml`.
 The window-harness tests draw real frames and press real keys — including one
 that marks a directory, confirms the deletion and checks that the files are
 gone while their neighbours are not.
+
+On macOS and Windows, use `cargo xtask lint` and `cargo xtask test` for the
+same checks. CI also builds release binaries and runs each binary with
+`--help`.
 
 | path | what lives there |
 | --- | --- |
