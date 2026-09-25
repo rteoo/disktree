@@ -86,3 +86,92 @@ jobs:
             gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
               --title "disktree ${TAG#v}" --generate-notes
           fi
+
+  macos:
+    name: Build macOS archive
+    needs: release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo xtask test
+
+      - name: Build
+        run: cargo build --release --locked -p disktree-app
+
+      - name: Package
+        id: package
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          name="disktree-$version-aarch64-macos"
+          mkdir -p "dist/$name"
+          cp target/release/disktree README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+
+  windows:
+    name: Build Windows archive
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo xtask test
+
+      - name: Build
+        run: cargo build --release --locked -p disktree-app
+
+      - name: Package
+        id: package
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: pwsh
+        run: |
+          $version = $env:TAG.Substring(1)
+          $name = "disktree-$version-x86_64-windows"
+          $folder = "dist/$name"
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          Copy-Item -Path @('target/release/disktree.exe', 'README.md', 'LICENSE') -Destination $folder
+          $archive = "$folder.zip"
+          Compress-Archive -Path $folder -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Out-File -FilePath "$archive.sha256" -Encoding ascii -NoNewline
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        shell: pwsh
+        run: |
+          $checksum = "$($env:ARCHIVE).sha256"
+          gh release upload $env:TAG $env:ARCHIVE $checksum --clobber
