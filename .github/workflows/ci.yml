@@ -43,3 +43,25 @@ jobs:
 
       - name: Test
         run: cargo xtask test
+
+  windows:
+    name: Windows lint, test, and build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint
+        run: cargo xtask lint
+
+      - name: Test
+        run: cargo xtask test
+
+      - name: Build
+        run: cargo build --release --locked -p disktree-app

@@ -742,6 +742,31 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_hidden_attribute_is_skipped_when_requested() {
+        let temp = TempDir::new().expect("tempdir");
+        let hidden = temp.path().join("secret.bin");
+        fs::write(&hidden, b"data").expect("write");
+        let status = std::process::Command::new("attrib")
+            .arg("+H")
+            .arg(&hidden)
+            .status()
+            .expect("attrib");
+        assert!(status.success(), "set hidden attribute");
+
+        let all = scan_dir(temp.path(), &options());
+        assert!(all.child_named("secret.bin").is_some());
+        let visible = scan_dir(
+            temp.path(),
+            &ScanOptions {
+                include_hidden: false,
+                ..options()
+            },
+        );
+        assert!(visible.child_named("secret.bin").is_none());
+    }
+
     /// Apparent sizes, so the assertions are about the tree rather than about
     /// how the filesystem rounds a small file up to a block.
     fn options() -> ScanOptions {
@@ -857,6 +882,7 @@ mod tests {
         assert_eq!(without.bytes, 100);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_are_not_followed_by_default() {
         let temp = TempDir::new().expect("tempdir");
@@ -876,6 +902,7 @@ mod tests {
         assert!(link.bytes < 100, "a link holds only its target string");
     }
 
+    #[cfg(unix)]
     #[test]
     fn followed_symlink_loops_do_not_hang_the_scan() {
         let temp = TempDir::new().expect("tempdir");
@@ -946,6 +973,7 @@ mod tests {
         assert_eq!(by_files.children[0].files, 5);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_directory_is_recorded_not_fatal() {
         use std::os::unix::fs::PermissionsExt as _;

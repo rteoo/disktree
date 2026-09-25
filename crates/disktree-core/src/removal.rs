@@ -658,6 +658,25 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_paths_are_blocked_but_home_contents_are_allowed() {
+        let temp = tree();
+        let drive = crate::space::volume_root_for(temp.path())
+            .expect("volume root");
+        let home = drive.join("Users/example");
+        for name in [
+            "Windows/System32",
+            "Program Files/Example",
+            "ProgramData/Example",
+            "Users/another",
+        ] {
+            let path = drive.join(name);
+            assert!(system_tree(&path, Some(&home)).is_some(), "{name}");
+        }
+        assert_eq!(system_tree(&home.join("Downloads"), Some(&home)), None);
+    }
+
     fn target(path: &Path, bytes: u64) -> Target {
         Target {
             path: path.to_path_buf(),
@@ -767,6 +786,7 @@ mod tests {
         assert!(temp.path().join("a/c.bin").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn permanent_removal_unlinks_a_symlink_instead_of_following_it() {
         let temp = tree();
@@ -808,6 +828,7 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_xdg_trash_moves_a_file_and_records_where_it_came_from() {
         // A private trash directory keeps the test out of the real trash can.
@@ -830,6 +851,7 @@ mod tests {
         assert!(info.contains("DeletionDate="));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_trash_info_path_is_restorable() {
         let trash = TempDir::new().expect("tempdir");
@@ -898,6 +920,7 @@ mod tests {
         assert!(root.join("a/one.bin").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_trash_tool_is_called_with_the_path_after_a_separator() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -926,6 +949,7 @@ mod tests {
         assert!(doomed.exists(), "the real tool would have moved it");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failing_trash_tool_reports_its_stderr() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -940,6 +964,7 @@ mod tests {
         assert!(error.to_string().contains("no trash here"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn detection_prefers_a_tool_this_machine_has() {
         let backend = detect_trash_backend();
@@ -949,6 +974,7 @@ mod tests {
         assert!(backend.is_available());
     }
 
+    #[cfg(unix)]
     #[test]
     fn system_trees_are_refused_in_a_whole_disk_scan() {
         let home = Path::new("/home/tobi");
