@@ -26,7 +26,7 @@ use std::thread;
 use rayon::Scope;
 use rustc_hash::FxHashSet;
 
-use crate::tree::{Metric, Node, NodeKind, aggregate};
+use crate::tree::{FileKey, Metric, Node, NodeKind, aggregate};
 
 /// Errors kept verbatim before the list is truncated; the count keeps rising.
 const MAX_ERROR_DETAIL: usize = 50;
@@ -253,7 +253,7 @@ struct WalkContext {
     /// when the table cannot be read, and devices are compared instead.
     foreign_mounts: OnceLock<FxHashSet<PathBuf>>,
     /// Directories already entered, so followed symlinks cannot loop.
-    visited_dirs: Mutex<FxHashSet<(u64, u64)>>,
+    visited_dirs: Mutex<FxHashSet<FileKey>>,
     /// Set by the root's `complete`, read after the scope joins.
     root: Mutex<Option<Node>>,
 }
@@ -264,7 +264,9 @@ impl WalkContext {
         if let Some(device) = *cached {
             return Some(device);
         }
-        let device = fs::metadata(path).map(|meta| device_of(&meta)).ok();
+        let device = fs::metadata(path)
+            .and_then(|meta| device_of(path, &meta))
+            .ok();
         *cached = device;
         device
     }
@@ -362,7 +364,9 @@ impl WalkContext {
                     return Classified::Skipped;
                 }
             } else if self.options.one_filesystem {
-                let device = entry.metadata().map(|meta| device_of(&meta));
+                let device = entry
+                    .metadata()
+                    .and_then(|meta| device_of(&path, &meta));
                 match (device, self.root_device(&path)) {
                     (Ok(device), Some(root_device))
                         if device != root_device =>
@@ -381,7 +385,9 @@ impl WalkContext {
         }
 
         match entry.metadata() {
-            Ok(meta) => self.leaf(name, kind_of(&meta, file_type), &meta),
+            Ok(meta) => {
+                self.leaf(&path, name, kind_of(&meta, file_type), &meta)
+            }
             Err(error) => {
                 self.progress.record_error(&path, &error);
                 Classified::Skipped
@@ -397,13 +403,22 @@ impl WalkContext {
             // `du` reports as a handful of bytes or nothing at all.
             return match fs::symlink_metadata(path) {
                 Ok(meta) => {
-                    let size = measure(&meta, self.options.apparent_size);
+                    #[cfg(unix)]
+                    let size = measure(path, &meta, self.options.apparent_size)
+                        .expect("Unix metadata measurement cannot fail");
+                    #[cfg(windows)]
+                    let size = 0;
                     self.progress.count_file(size);
+                    #[cfg(unix)]
+                    let inode = file_identity(path, &meta).ok();
+                    #[cfg(windows)]
+                    let inode = None;
                     Classified::Entry(leaf_node(
                         name,
                         NodeKind::Symlink,
                         size,
                         &meta,
+                        inode,
                     ))
                 }
                 Err(error) => {
@@ -425,7 +440,7 @@ impl WalkContext {
         };
 
         if meta.is_dir() {
-            if let Some(key) = file_identity(&meta)
+            if let Ok(key) = file_identity(path, &meta)
                 && !lock(&self.visited_dirs).insert(key)
             {
                 return Classified::Skipped;
@@ -434,18 +449,32 @@ impl WalkContext {
             return Classified::Subdirectory(path.to_path_buf());
         }
 
-        self.leaf(name, kind_of(&meta, meta.file_type()), &meta)
+        self.leaf(path, name, kind_of(&meta, meta.file_type()), &meta)
     }
 
     fn leaf(
         &self,
+        path: &Path,
         name: Box<str>,
         kind: NodeKind,
         meta: &Metadata,
     ) -> Classified {
-        let size = measure(meta, self.options.apparent_size);
+        let size = match measure(path, meta, self.options.apparent_size) {
+            Ok(size) => size,
+            Err(error) => {
+                self.progress.record_error(path, &error);
+                return Classified::Skipped;
+            }
+        };
+        let inode = match file_identity(path, meta) {
+            Ok(inode) => Some(inode),
+            Err(error) => {
+                self.progress.record_error(path, &error);
+                return Classified::Skipped;
+            }
+        };
         self.progress.count_file(size);
-        Classified::Entry(leaf_node(name, kind, size, meta))
+        Classified::Entry(leaf_node(name, kind, size, meta, inode))
     }
 }
 
@@ -523,14 +552,14 @@ fn scan_blocking(root: &Path, context: &Arc<WalkContext>) -> io::Result<Node> {
         ));
     }
     if context.options.one_filesystem {
-        *lock(&context.root_device) = Some(device_of(&root_meta));
+        *lock(&context.root_device) = Some(device_of(root, &root_meta)?);
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         if let Some(foreign) = crate::space::foreign_mounts_for(&root) {
             let _ = context.foreign_mounts.set(foreign.into_iter().collect());
         }
     }
     if context.options.follow_links
-        && let Some(key) = file_identity(&root_meta)
+        && let Ok(key) = file_identity(root, &root_meta)
     {
         lock(&context.visited_dirs).insert(key);
     }
@@ -639,7 +668,7 @@ fn finish_tree(mut node: Node, options: &ScanOptions) -> Node {
     node
 }
 
-fn mark_duplicate_hardlinks(node: &mut Node, seen: &mut FxHashSet<(u64, u64)>) {
+fn mark_duplicate_hardlinks(node: &mut Node, seen: &mut FxHashSet<FileKey>) {
     if !node.is_dir() {
         if node.inode.is_some_and(|key| !seen.insert(key)) {
             node.own_bytes = 0;
@@ -656,9 +685,10 @@ fn leaf_node(
     kind: NodeKind,
     size: u64,
     meta: &Metadata,
+    inode: Option<FileKey>,
 ) -> Node {
     let mut node = Node::entry(name, kind, size);
-    node.inode = file_identity(meta);
+    node.inode = inode;
     node.modified = modified_seconds(meta);
     node
 }
@@ -674,19 +704,30 @@ fn modified_seconds(meta: &Metadata) -> i64 {
         })
 }
 
-fn measure(meta: &Metadata, apparent_size: bool) -> u64 {
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Windows allocated-size lookup can fail; Unix uses metadata"
+)]
+fn measure(path: &Path, meta: &Metadata, apparent_size: bool) -> io::Result<u64> {
     if apparent_size {
-        meta.len()
+        Ok(meta.len())
     } else {
-        allocated_bytes(meta).unwrap_or(meta.len())
+        #[cfg(unix)]
+        {
+            let _ = path;
+            Ok(allocated_bytes(meta).unwrap_or(meta.len()))
+        }
+        #[cfg(windows)]
+        {
+            filesize::file_real_size_fast(path, meta)
+        }
     }
 }
 
 /// Allocated bytes, `st_blocks * 512`: sparse files spend less than they claim,
 /// and this is the number that matches `du`.
 ///
-/// Returns `Option` because only Unix reports allocated blocks; elsewhere the
-/// caller falls back to the apparent length.
+/// Returns `Option` to preserve the Unix measurement path.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "the Option is the non-Unix answer, where the caller falls back"
@@ -697,38 +738,45 @@ fn allocated_bytes(meta: &Metadata) -> Option<u64> {
     Some(meta.blocks().saturating_mul(512))
 }
 
-#[cfg(not(unix))]
-fn allocated_bytes(_meta: &Metadata) -> Option<u64> {
-    None
-}
-
 #[cfg(unix)]
-fn device_of(meta: &Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt as _;
-    meta.dev()
-}
-
-#[cfg(not(unix))]
-fn device_of(_meta: &Metadata) -> u64 {
-    0
-}
-
-/// `(device, inode)`, or `None` where the platform does not expose them.
-/// Hardlink de-duplication and symlink loop detection both depend on this, so
-/// they are simply unavailable rather than silently wrong elsewhere.
 #[allow(
     clippy::unnecessary_wraps,
-    reason = "the Option is the non-Unix answer, so both arms must agree"
+    reason = "Windows volume identity lookup can fail"
 )]
-#[cfg(unix)]
-fn file_identity(meta: &Metadata) -> Option<(u64, u64)> {
+fn device_of(_path: &Path, meta: &Metadata) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt as _;
-    Some((meta.dev(), meta.ino()))
+    Ok(meta.dev())
 }
 
-#[cfg(not(unix))]
-fn file_identity(_meta: &Metadata) -> Option<(u64, u64)> {
-    None
+#[cfg(windows)]
+fn device_of(path: &Path, _meta: &Metadata) -> io::Result<u64> {
+    match file_id::get_file_id(path)? {
+        file_id::FileId::HighRes {
+            volume_serial_number,
+            ..
+        } => Ok(volume_serial_number),
+        file_id::FileId::LowRes {
+            volume_serial_number,
+            ..
+        } => Ok(u64::from(volume_serial_number)),
+        file_id::FileId::Inode { device_id, .. } => Ok(device_id),
+    }
+}
+
+/// Stable identity for hardlink accounting and followed-directory loops.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Windows file identity lookup can fail"
+)]
+#[cfg(unix)]
+fn file_identity(_path: &Path, meta: &Metadata) -> io::Result<FileKey> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path, _meta: &Metadata) -> io::Result<FileKey> {
+    file_id::get_file_id(path)
 }
 
 fn kind_of(meta: &Metadata, file_type: fs::FileType) -> NodeKind {

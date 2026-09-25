@@ -49,6 +49,7 @@ impl SpaceInfo {
 }
 
 /// Read the space on the volume containing `path`.
+#[cfg(unix)]
 pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
     let stat = rustix::fs::statvfs(path)?;
     // `f_frsize` is the fragment size the block counts are expressed in;
@@ -63,6 +64,17 @@ pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
         total: stat.f_blocks.saturating_mul(block),
         free: stat.f_bfree.saturating_mul(block),
         available: stat.f_bavail.saturating_mul(block),
+    })
+}
+
+/// Read Windows volume totals and free space from the same filesystem.
+#[cfg(windows)]
+pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
+    let stat = fs2::statvfs(path)?;
+    Ok(SpaceInfo {
+        total: stat.total_space(),
+        free: stat.free_space(),
+        available: stat.available_space(),
     })
 }
 
@@ -237,6 +249,16 @@ mod tests {
         assert!(path.starts_with(&root));
         assert_eq!(root.parent(), None);
         assert_eq!(foreign_mounts_for(&root), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_space_comes_from_the_containing_volume() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let space = space_info(temp.path()).expect("volume space");
+        assert!(space.total > 0);
+        assert!(space.free <= space.total);
+        assert!(space.available <= space.free);
     }
 
     const OMARCHY: &str = "\

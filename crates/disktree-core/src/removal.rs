@@ -310,6 +310,9 @@ pub fn normalize(path: &Path) -> PathBuf {
 /// Which tool, if any, moves files to the desktop trash.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrashBackend {
+    /// The Windows Recycle Bin.
+    #[cfg(windows)]
+    Native,
     /// `trash-put` from trash-cli.
     TrashPut,
     /// `gio trash`, present anywhere `GLib` is installed.
@@ -325,12 +328,16 @@ impl TrashBackend {
     pub const fn is_available(self) -> bool {
         match self {
             Self::TrashPut | Self::Gio | Self::XdgHome => true,
+            #[cfg(windows)]
+            Self::Native => true,
             Self::Unavailable => false,
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
+            #[cfg(windows)]
+            Self::Native => "Recycle Bin",
             Self::TrashPut => "trash-put",
             Self::Gio => "gio trash",
             Self::XdgHome => "XDG trash",
@@ -340,6 +347,8 @@ impl TrashBackend {
 
     pub const fn detail(self) -> &'static str {
         match self {
+            #[cfg(windows)]
+            Self::Native => "uses Windows Recycle Bin",
             Self::TrashPut => {
                 "uses trash-cli, the same trash as your file manager"
             }
@@ -357,8 +366,7 @@ impl TrashBackend {
 /// Detect the best available trash backend for this machine.
 #[cfg(windows)]
 pub const fn detect_trash_backend() -> TrashBackend {
-    // The XDG fallback is not the Windows Recycle Bin.
-    TrashBackend::Unavailable
+    TrashBackend::Native
 }
 
 #[cfg(not(windows))]
@@ -547,6 +555,8 @@ pub fn move_to_trash(path: &Path, backend: TrashBackend) -> io::Result<()> {
         ensure_no_nested_mounts(path)?;
     }
     match backend {
+        #[cfg(windows)]
+        TrashBackend::Native => trash::delete(path).map_err(io::Error::other),
         TrashBackend::TrashPut => run_tool(Path::new("trash-put"), &[], path),
         TrashBackend::Gio => run_tool(Path::new("gio"), &["trash"], path),
         TrashBackend::XdgHome => trash_via_xdg(path),
@@ -701,7 +711,7 @@ mod tests {
             assert!(system_tree(&path, Some(&home)).is_some(), "{name}");
         }
         assert_eq!(system_tree(&home.join("Downloads"), Some(&home)), None);
-        assert_eq!(detect_trash_backend(), TrashBackend::Unavailable);
+        assert_eq!(detect_trash_backend(), TrashBackend::Native);
     }
 
     #[cfg(windows)]
