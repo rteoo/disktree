@@ -259,7 +259,10 @@ fn device_boundary(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return true;
     };
-    fs::symlink_metadata(parent).is_err_or(|other| other.dev() != meta.dev())
+    match fs::symlink_metadata(parent) {
+        Ok(other) => other.dev() != meta.dev(),
+        Err(_) => true,
+    }
 }
 
 #[cfg(not(unix))]
