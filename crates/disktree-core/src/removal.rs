@@ -651,6 +651,7 @@ pub fn trash_into(_path: &Path, _trash: &Path) -> io::Result<()> {
 }
 
 /// `name`, or `name.1`, `name.2`, … until the name is free in `dir`.
+#[cfg(any(unix, test))]
 fn unique_name(dir: &Path, name: &str) -> (PathBuf, String) {
     let first = dir.join(name);
     if !first.exists() {
@@ -683,6 +684,7 @@ pub fn percent_encode(input: &str) -> String {
     out
 }
 
+#[cfg(unix)]
 fn deletion_date() -> String {
     // The specification wants ISO 8601 in local time; chrono is already in the
     // dependency graph, so use it rather than approximating the offset.
@@ -722,6 +724,16 @@ mod tests {
         let canonical = home.canonicalize().expect("canonical home");
         assert!(is_windows_home(&canonical, &home));
         assert!(in_windows_home(&canonical.join("b"), &home));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recycle_bin_moves_only_the_selected_file() {
+        let temp = tree();
+        let selected = temp.path().join("a/c.bin");
+        move_to_trash(&selected, TrashBackend::Native).expect("Recycle Bin");
+        assert!(!selected.exists());
+        assert!(temp.path().join("a/one.bin").exists());
     }
 
     fn target(path: &Path, bytes: u64) -> Target {

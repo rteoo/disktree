@@ -937,6 +937,19 @@ mod tests {
         assert_eq!(counted.bytes, 8192);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_scan_uses_allocated_size() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = write(temp.path(), "file.bin", 1000);
+        let metadata = fs::metadata(&path).expect("metadata");
+        let expected = filesize::file_real_size_fast(&path, &metadata)
+            .expect("allocated size");
+
+        let tree = scan_dir(temp.path(), &ScanOptions::default());
+        assert_eq!(child(&tree, "file.bin").bytes, expected);
+    }
+
     #[test]
     fn hidden_entries_are_included_by_default_and_excluded_on_request() {
         let temp = TempDir::new().expect("tempdir");

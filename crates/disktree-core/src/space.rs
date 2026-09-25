@@ -232,7 +232,7 @@ pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
 
 /// Windows scan boundaries are checked from volume identities per entry.
 #[cfg(windows)]
-pub fn foreign_mounts_for(_root: &Path) -> Option<Vec<PathBuf>> {
+pub const fn foreign_mounts_for(_root: &Path) -> Option<Vec<PathBuf>> {
     None
 }
 

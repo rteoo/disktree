@@ -65,3 +65,6 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked -p disktree-app
+
+      - name: Smoke test binary
+        run: target/release/disktree.exe --help
