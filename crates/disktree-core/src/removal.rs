@@ -578,7 +578,9 @@ fn mount_points() -> Result<Arc<Vec<PathBuf>>, String> {
             cache.refreshing = false;
         }
     }
-    cached_mounts(&cache)
+    let mounts = cached_mounts(&cache);
+    drop(cache);
+    mounts
 }
 
 fn cached_mounts(cache: &MountCache) -> Result<Arc<Vec<PathBuf>>, String> {
@@ -736,6 +738,7 @@ fn windows_mount_points() -> Vec<PathBuf> {
 /// A mount point strictly inside the path keyed `key`, if there is one. A
 /// scan that stays on one filesystem never shows what is mounted there, so
 /// the user cannot have meant to remove it.
+#[cfg(test)]
 fn mount_below<'a>(key: &Path, mounts: &'a [PathBuf]) -> Option<&'a Path> {
     mounts
         .iter()
@@ -1279,6 +1282,7 @@ pub fn remove_permanently(path: &Path, _root: &Path) -> io::Result<()> {
 /// Where a directory lives, as far as crossing into another filesystem goes.
 #[cfg(unix)]
 struct Volume {
+    #[cfg(any(not(target_os = "linux"), test))]
     device: rustix::fs::Stat,
     /// The mount the directory belongs to, where the kernel reports it (Linux,
     /// `statx`). See [`Self::contains`].
@@ -1289,6 +1293,7 @@ struct Volume {
 impl Volume {
     fn of(dir: &std::os::fd::OwnedFd) -> io::Result<Self> {
         Ok(Self {
+            #[cfg(any(not(target_os = "linux"), test))]
             device: rustix::fs::fstat(dir)?,
             mount: mount_id(dir)?,
         })
@@ -2044,7 +2049,7 @@ mod tests {
         }
 
         let temp = tree();
-        let root = temp.path();
+        let root = temp.path().to_path_buf();
         let marked = root.join("a");
         let source = root.join("other");
         let mountpoint = marked.join("b");
@@ -2063,11 +2068,11 @@ mod tests {
             mounted: true,
         };
 
-        let planned = plan(&[target(&marked, 0)], root);
+        let planned = plan(&[target(&marked, 0)], &root);
         assert!(planned.is_empty(), "nested mount is blocked in review");
         assert_eq!(planned.blocked.len(), 1);
         let error =
-            remove_permanently(&marked, root).expect_err("nested mount");
+            remove_permanently(&marked, &root).expect_err("nested mount");
         assert!(error.to_string().contains("mounted filesystem"));
         assert!(keep.exists(), "mounted data was not touched");
         assert!(
