@@ -4,11 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::classify::{Category, Reclaim};
 
-#[cfg(unix)]
 pub type FileKey = (u64, u64);
-
-#[cfg(windows)]
-pub type FileKey = file_id::FileId;
 
 /// What a node represents on disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

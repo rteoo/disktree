@@ -56,23 +56,45 @@ pub fn root(
         .debug_selector(|| "disktree-root".into())
         .track_focus(&app.focus)
         .key_context("Disktree")
-        // The listener is the only place with a window in hand, so it is also
-        // where the titlebar is kept in step with the directory on screen.
+        .on_action(cx.listener(|this, _: &crate::app_menu::Rescan, _, cx| {
+            // Where `r` would: not behind the confirmation, and not under
+            // the review list or a removal that is still running.
+            if this.can_start_over() {
+                this.start_scan(cx);
+            }
+        }))
+        .on_action(cx.listener(
+            |this, _: &crate::app_menu::OpenFolder, _, cx| {
+                if this.can_start_over() {
+                    Disktree::open_folder(cx);
+                }
+            },
+        ))
+        .on_action(cx.listener(
+            |this, _: &crate::app_menu::ShowInFinder, _, cx| {
+                this.reveal_target(cx);
+            },
+        ))
+        // Only where the history buttons are: the review screen has none.
+        .on_action(cx.listener(|this, _: &crate::app_menu::GoBack, _, cx| {
+            if this.screen == Screen::Explore {
+                this.go_back(cx);
+            }
+        }))
+        .on_action(cx.listener(
+            |this, _: &crate::app_menu::GoForward, _, cx| {
+                if this.screen == Screen::Explore {
+                    this.go_forward(cx);
+                }
+            },
+        ))
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             if this.zoom_interface(event, window) {
                 cx.notify();
                 return;
             }
-            let moved = this.on_key_down(event, cx);
+            this.on_key_down(event, cx);
             this.apply_focus(window, cx);
-            if moved {
-                let path = this.current_path();
-                let title = format!(
-                    "disktree · {}",
-                    crate::marks::display_path(&path, this.home.as_deref())
-                );
-                window.set_window_title(&title);
-            }
         }))
         .relative()
         .flex()
@@ -363,11 +385,13 @@ fn trail(app: &Disktree, theme: &Theme, cx: &Context<'_, Disktree>) -> Div {
 /// Steps a trail shows before it folds its middle into an ellipsis.
 const TRAIL_STEPS: usize = 7;
 
+/// The platform's path separator, so the trail reads like the paths shown
+/// elsewhere: `/` here, `\` on Windows.
 fn separator_glyph(theme: &Theme) -> Div {
     div()
         .text_color(theme.secondary.opacity(0.5))
         .text_size(text::BODY)
-        .child("/")
+        .child(std::path::MAIN_SEPARATOR_STR)
 }
 
 /// A crumb in the tree. Its label goes there (the current one opens the
@@ -688,6 +712,84 @@ fn view_settings(
     };
 
     let theme = cx.omarchy().clone();
+    // Back and forward through the directories visited, beside the choices
+    // that change how the one on screen is drawn.
+    let travel = |id: &'static str,
+                  label: &'static str,
+                  enabled: bool,
+                  back: bool,
+                  go: fn(&mut Disktree, &mut Context<'_, Disktree>),
+                  cx: &mut Context<'_, Disktree>| {
+        let shown = app.history_hover == Some(back);
+        div()
+            .id(ElementId::Name(format!("{id}-hover").into()))
+            .debug_selector(move || id.into())
+            .relative()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                // Leaving one button can be reported after entering the
+                // other; only the button that owns the card takes it away.
+                if *hovered {
+                    this.history_hover = Some(back);
+                } else if this.history_hover == Some(back) {
+                    this.history_hover = None;
+                }
+                cx.notify();
+            }))
+            .child(
+                button(id, label, ButtonVariant::Secondary, cx)
+                    .tab_stop(false)
+                    .disabled(!enabled)
+                    // Borderless: glyphs on the bar, not controls in a
+                    // frame. Hover keeps the fill but not the outline it
+                    // would add.
+                    .hover(|style| {
+                        style
+                            .bg(theme.hover_fill())
+                            .border_color(theme.foreground.opacity(0.))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        go(this, cx);
+                        window.focus(&this.focus, cx);
+                    })),
+            )
+            .when(shown, |this| {
+                // Anchored to a holder pinned at the button's bottom edge, so
+                // the card hangs below it and never covers it; deferred so it
+                // paints over the mosaic.
+                this.child(
+                    div().absolute().top_full().left_0().child(
+                        deferred(
+                            anchored()
+                                .snap_to_window_with_margin(px(8.))
+                                .offset(gpui_kit::point(px(0.), px(4.)))
+                                .child(history_card(app, back, cx)),
+                        )
+                        .with_priority(2),
+                    ),
+                )
+            })
+    };
+    let history = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .child(travel(
+            "history-back",
+            "<",
+            app.can_go_back(),
+            true,
+            Disktree::go_back,
+            cx,
+        ))
+        .child(travel(
+            "history-forward",
+            ">",
+            app.can_go_forward(),
+            false,
+            Disktree::go_forward,
+            cx,
+        ));
+
     let depth = app.layout_options.max_depth;
     let stepper = |id: &'static str,
                    label: &'static str,
@@ -727,6 +829,7 @@ fn view_settings(
         .items_center()
         .gap(space::SM)
         .flex_shrink_0()
+        .child(history)
         .child(mode)
         .child(hidden)
         .child(apparent)
@@ -899,6 +1002,7 @@ fn side_panel(
                 .child(marked_section(app, theme, cx)),
         )
         .children(notice_line(app, theme, cx))
+        .children(privacy_line(app, theme, cx))
         .child(disk_section(app, theme, cx))
 }
 
@@ -1420,6 +1524,60 @@ fn notice_line(app: &Disktree, theme: &Theme, cx: &App) -> Option<Div> {
             .text_color(color)
             .text_size(text::CAPTION)
             .child(message),
+    )
+}
+
+/// Why folders were unreadable on macOS, and the one place to fix it.
+///
+/// Only once the scan has hit something it could not read and the process is
+/// known to lack Full Disk Access: an unreadable folder has other causes, and
+/// the hint must not nag when it would not help. A grant needs a relaunch, and
+/// started from a terminal it is the terminal that needs it.
+fn privacy_line(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Option<Div> {
+    if app.progress.errors == 0 || app.full_disk_access != Some(false) {
+        return None;
+    }
+    let color = theme.warning;
+    let errors = app.progress.errors;
+    let noun = if errors == 1 { "item" } else { "items" };
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .px(space::SM)
+            .py(space::SM)
+            .border_1()
+            .border_color(color.opacity(0.5))
+            .text_size(text::CAPTION)
+            .child(div().text_color(color).child(format!(
+                "macOS kept {} {noun} unreadable. Give disktree Full Disk \
+                 Access, or your terminal if you started it there, then \
+                 reopen it.",
+                widgets::human_count(errors)
+            )))
+            .child(
+                button(
+                    "privacy",
+                    "Open Privacy Settings",
+                    ButtonVariant::Outline,
+                    cx,
+                )
+                .tab_stop(false)
+                .justify_center()
+                .on_click(cx.listener(
+                    |this, _, window, cx| {
+                        cx.open_url(
+                            disktree_core::access::FULL_DISK_ACCESS_SETTINGS,
+                        );
+                        window.focus(&this.focus, cx);
+                    },
+                )),
+            ),
     )
 }
 
@@ -2183,7 +2341,46 @@ fn review_summary(
 
     panel
         .child(div().flex_1())
+        .children(notice_line(app, theme, cx))
+        .child(export_controls(plan, cx))
         .child(commit_controls(app, plan, cx))
+}
+
+/// The list handed on instead of acted on: saved as paths, or copied as a
+/// prompt for a coding agent to do the cleanup with care.
+fn export_controls(
+    plan: &disktree_core::removal::Plan,
+    cx: &Context<'_, Disktree>,
+) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .gap(space::SM)
+        .child(
+            button(
+                "save-list",
+                "Save list\u{2026}",
+                ButtonVariant::Secondary,
+                cx,
+            )
+            .disabled(plan.is_empty())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.save_delete_list(cx);
+            })),
+        )
+        .child(
+            button(
+                "copy-prompt",
+                "Copy as prompt",
+                ButtonVariant::Secondary,
+                cx,
+            )
+            .disabled(plan.is_empty())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.copy_agent_prompt(cx);
+            })),
+        )
 }
 
 /// The screen's one commitment. Moving to the trash is the default commit,
@@ -2252,6 +2449,8 @@ fn review_footer(app: &Disktree, theme: &Theme, cx: &App) -> Div {
         .child(widgets::hint("m", "trash", cx))
         .child(widgets::hint("p", "permanent", cx))
         .child(widgets::hint("!", "unmark all", cx))
+        .child(widgets::hint("s", "save list", cx))
+        .child(widgets::hint("a", "copy as prompt", cx))
         .child(widgets::hint("esc", "back", cx))
         .child(div().flex_1())
         .child(
@@ -2592,37 +2791,80 @@ pub fn cursor_tooltip(
         anchor_y + gap
     };
 
-    // The same surface treatment as Omarchy's tooltip, square and bordered,
-    // so an anchored surface of this app does not drift from the system's.
-    // Translucent so the mosaic stays visible underneath it.
-    let theme = cx.omarchy();
     Some(
-        div()
+        card_surface(cx)
             .absolute()
             .left(px(x))
             .top(px(y))
-            .w(size::TOOLTIP)
-            .flex()
-            .flex_col()
-            .gap(space::XS)
-            .px(space::SM)
-            .py(space::SM)
-            .border_1()
-            .border_color(theme.control_border())
-            .bg(theme.background.opacity(0.93))
-            .text_color(theme.foreground)
-            .font_family(theme.font.clone())
-            .text_size(text::CAPTION)
             .child(content),
     )
 }
 
+/// The same surface treatment as Omarchy's tooltip, square and bordered,
+/// so an anchored surface of this app does not drift from the system's.
+/// Translucent so the mosaic stays visible underneath it.
+fn card_surface(cx: &gpui_kit::App) -> Div {
+    let theme = cx.omarchy();
+    div()
+        .w(size::TOOLTIP)
+        .flex()
+        .flex_col()
+        .gap(space::XS)
+        .px(space::SM)
+        .py(space::SM)
+        .border_1()
+        .border_color(theme.control_border())
+        .bg(theme.background.opacity(0.93))
+        .text_color(theme.foreground)
+        .font_family(theme.font.clone())
+        .text_size(text::CAPTION)
+}
+
+/// The card under `<` or `>` while it is hovered: what hovering a tile
+/// shows, for the directory the button goes to, so where it leads is known
+/// before going. Drawn by the app rather than as a tooltip, which GPUI puts
+/// at the pointer, over the button itself.
+fn history_card(app: &Disktree, back: bool, cx: &gpui_kit::App) -> Div {
+    let (label, keys) = if back {
+        ("Back", "alt \u{2190} back")
+    } else {
+        ("Forward", "alt \u{2192} forward")
+    };
+    let card = app
+        .history_target(back)
+        .and_then(|(_, crumbs)| node_card(app, &crumbs, keys, cx));
+    card_surface(cx)
+        .debug_selector(|| "history-tip".into())
+        .map(|surface| match card {
+            Some(card) => surface.child(card),
+            // Nowhere to go: the button is disabled; say what it is for.
+            None => surface.child(format!("{label} \u{00b7} {keys}")),
+        })
+}
+
 /// The tooltip content for the hovered tile: everything the tile cannot show.
 pub fn hover_tooltip(app: &Disktree, cx: &gpui_kit::App) -> Option<Div> {
+    let crumbs = app.hovered.as_deref()?;
+    let is_dir = app.node_at(crumbs)?.is_dir();
+    let keys = if is_dir {
+        "space mark · enter open"
+    } else {
+        "space mark"
+    };
+    node_card(app, crumbs, keys, cx)
+}
+
+/// What is known about the node at `crumbs`, as a card: name, path, size and
+/// share, counts, and badges, with `keys` for what can be done from there.
+fn node_card(
+    app: &Disktree,
+    crumbs: &[usize],
+    keys: &str,
+    cx: &gpui_kit::App,
+) -> Option<Div> {
     let theme = cx.omarchy();
-    let crumbs = app.hovered.clone()?;
-    let node = app.node_at(&crumbs)?;
-    let path = app.path_at(&crumbs);
+    let node = app.node_at(crumbs)?;
+    let path = app.path_at(crumbs);
     let parent = crumbs[..crumbs.len().saturating_sub(1)].to_vec();
     let parent_value = app.node_at(&parent).map_or(0, |node| node.bytes);
     let marked = path.as_deref().is_some_and(|path| app.marks.contains(path));
@@ -2725,34 +2967,43 @@ pub fn hover_tooltip(app: &Disktree, cx: &gpui_kit::App) -> Option<Div> {
         div()
             .text_size(text::CAPTION)
             .text_color(theme.secondary.opacity(0.7))
-            .child(if node.is_dir() {
-                "space mark · enter open"
-            } else {
-                "space mark"
-            }),
+            .child(keys.to_string()),
     );
     Some(tip)
 }
 
+/// The modifier the help names for clicks and interface zoom. Both are
+/// accepted everywhere; this is the one each platform's users reach for, and
+/// on macOS ctrl-click is a right-click.
+const MODIFIER_CLICK: &str = if cfg!(target_os = "macos") {
+    "\u{2318}-click"
+} else {
+    "ctrl-click"
+};
+const MODIFIER_ZOOM: &str = if cfg!(target_os = "macos") {
+    "\u{2318} = / - / 0"
+} else {
+    "ctrl = / - / 0"
+};
+const MODIFIER_OPEN: &str = if cfg!(target_os = "macos") {
+    "\u{2318}O"
+} else {
+    "ctrl-o"
+};
+
 fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
     let theme = cx.omarchy();
-    let mark_modifier = if cfg!(target_os = "macos") {
-        "cmd-click"
-    } else {
-        "ctrl-click"
-    };
-    let zoom_modifier = if cfg!(target_os = "macos") {
-        "cmd = / - / 0"
-    } else {
-        "ctrl = / - / 0"
-    };
     // Sentence case, and the tile a key acts on is always the one under the
     // pointer if the pointer moved last, else the keyboard selection.
-    let rows: [(&str, &str); 24] = [
+    let rows: [(&str, &str); 27] = [
         ("space / x", "Mark or unmark the tile you point at"),
-        (mark_modifier, "Mark without moving the selection"),
+        (MODIFIER_CLICK, "Mark without moving the selection"),
         ("enter", "Open that directory, at any depth"),
         ("\u{232b} / esc", "Go up one directory"),
+        (
+            "alt \u{2190} / \u{2192}",
+            "Back or forward through where you have been",
+        ),
         (
             "\u{2190} \u{2191} \u{2193} \u{2192}",
             "Move between tiles at this level",
@@ -2762,7 +3013,7 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         ("shift-scroll", "Pan the magnified view"),
         ("[ / ]", "Draw fewer or more levels at once"),
         ("- / = / 0", "Magnify, shrink, or reset the view"),
-        (zoom_modifier, "Interface zoom"),
+        (MODIFIER_ZOOM, "Interface zoom"),
         (
             "/",
             "Filter by name: only matches keep their colour; enter shows only them",
@@ -2770,15 +3021,26 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         ("c", "Review the marked list"),
         ("t", "Size, files or age: what areas and colours say"),
         ("r", "Scan again from the same root"),
+        (MODIFIER_OPEN, "Choose another directory to scan"),
         ("g", "The whole disk; click any directory above to widen"),
         ("d", "Disk usage or apparent size"),
         ("i", "Include or skip hidden entries"),
         ("p", "Show or hide the selection line"),
+        (
+            "o",
+            if cfg!(target_os = "macos") {
+                "Show it in Finder"
+            } else if cfg!(windows) {
+                "Show it in File Explorer"
+            } else {
+                "Show it in the file manager"
+            },
+        ),
         ("q", "Quit"),
         ("", ""),
         (
             "Review screen",
-            "m trash \u{00b7} p permanent \u{00b7} ! unmark all",
+            "m trash \u{00b7} p permanent \u{00b7} ! unmark all \u{00b7} s save list \u{00b7} a copy as prompt",
         ),
         ("", "enter commits \u{00b7} esc goes back"),
         ("", "A permanent deletion always asks first"),
