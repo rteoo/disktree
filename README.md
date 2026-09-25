@@ -17,16 +17,16 @@ your theme and behaves like the rest of the desktop.
 
 ## Install
 
-This source tree is based on upstream 0.10.0. The fork's latest published
+This source tree is based on upstream 0.10.1. The fork's latest published
 release is still v0.9.1: it has three archives, each with a `.sha256`
 checksum — Linux x86_64, macOS Apple Silicon, and Windows x86_64. Download
 those from [this fork's releases](https://github.com/rteoo/disktree/releases).
 
-The original project's latest release is v0.10.0, with six architecture
+The original project's v0.10.0 release has six architecture
 archives: Linux x86_64 and aarch64, macOS x86_64 and aarch64 app bundles, and
-Windows x86_64 and aarch64. Those are published by
-[the original project](https://github.com/tobi/disktree/releases/latest).
-The fork has not published a v0.10.0 release.
+Windows x86_64 and aarch64. Those are published in
+[the original project's v0.10.0 release](https://github.com/tobi/disktree/releases/tag/v0.10.0).
+The fork has not published a v0.10.x release.
 
 ### Linux (Omarchy)
 
@@ -69,8 +69,10 @@ The fork's v0.9.1 release has an Apple Silicon `.tar.gz` containing the
 binary, README and license; it does not contain an app bundle. Download it
 from [this fork's releases](https://github.com/rteoo/disktree/releases).
 The original project's v0.10.0 release has `.app` bundles for Apple Silicon
-and Intel Macs at
-[its latest release](https://github.com/tobi/disktree/releases/latest).
+and Intel Macs. Download `disktree-*-aarch64-macos.zip` (`x86_64-macos` for
+an Intel Mac) from
+[its v0.10.0 release](https://github.com/tobi/disktree/releases/tag/v0.10.0),
+unzip it, and drag `disktree.app` into Applications.
 To build the current source, use Rust 1.97 or newer and Xcode or its Command
 Line Tools. macOS does not come with Rust; install it with
 [rustup](https://rustup.rs).
@@ -80,9 +82,15 @@ make install     # ~/Applications/disktree.app, and ~/.local/bin/disktree
 make uninstall
 ```
 
-macOS 11 or newer. A bundle that was not signed and notarized is stopped by
-Gatekeeper the first time: open it once, then choose **Open Anyway** in
-System Settings › Privacy & Security.
+macOS 11 or newer. A bundle that was not signed and notarized may be stopped
+by Gatekeeper the first time. If you trust the download, open it once and
+choose **Open Anyway** in System Settings › Privacy & Security. If macOS
+says the downloaded app "is damaged and can't be opened", you can clear its
+quarantine mark once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/disktree.app
+```
 
 To see everything, give disktree **Full Disk Access** in System Settings ›
 Privacy & Security (the panel offers a button when it is missing), then
@@ -118,7 +126,7 @@ The fork's v0.9.1 release has an x86_64 Windows ZIP. Download
 [this fork's releases](https://github.com/rteoo/disktree/releases).
 The original project's v0.10.0 release also has x86_64 and aarch64 Windows
 archives at
-[its latest release](https://github.com/tobi/disktree/releases/latest).
+[its v0.10.0 release](https://github.com/tobi/disktree/releases/tag/v0.10.0).
 
 To build the current source on Windows 10 or 11, use Rust 1.97 or newer from
 [rustup](https://rustup.rs) and the MSVC toolchain (Visual Studio Build
