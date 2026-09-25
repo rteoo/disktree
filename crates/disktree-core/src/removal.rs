@@ -516,8 +516,11 @@ fn run(
     });
 }
 
-/// `rm -rf` semantics: a symlink is unlinked, never followed.
+/// `rm -rf` semantics on Unix: a symlink is unlinked, never followed.
+/// Windows reparse points are refused because they can redirect removal.
 pub fn remove_permanently(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    refuse_reparse_point(path)?;
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
         #[cfg(windows)]
@@ -535,12 +538,7 @@ fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let child = entry.path();
-        if is_mount_point(&child) {
-            return Err(io::Error::other(format!(
-                "refusing to remove reparse point {}",
-                child.display()
-            )));
-        }
+        refuse_reparse_point(&child)?;
         if fs::symlink_metadata(&child)?.is_dir() {
             ensure_no_nested_mounts(&child)?;
         }
@@ -548,11 +546,25 @@ fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn refuse_reparse_point(path: &Path) -> io::Result<()> {
+    if is_mount_point(path) {
+        return Err(io::Error::other(format!(
+            "refusing to remove reparse point {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Move one path to the desktop trash.
 pub fn move_to_trash(path: &Path, backend: TrashBackend) -> io::Result<()> {
     #[cfg(windows)]
-    if fs::symlink_metadata(path)?.is_dir() {
-        ensure_no_nested_mounts(path)?;
+    {
+        refuse_reparse_point(path)?;
+        if fs::symlink_metadata(path)?.is_dir() {
+            ensure_no_nested_mounts(path)?;
+        }
     }
     match backend {
         #[cfg(windows)]
@@ -734,6 +746,22 @@ mod tests {
         move_to_trash(&selected, TrashBackend::Native).expect("Recycle Bin");
         assert!(!selected.exists());
         assert!(temp.path().join("a/one.bin").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reparse_targets_are_refused_by_both_removal_modes() {
+        let temp = tree();
+        let keep = temp.path().join("a/one.bin");
+        let link = temp.path().join("link");
+        std::os::windows::fs::symlink_file(&keep, &link)
+            .expect("create file symlink");
+
+        assert!(is_mount_point(&link));
+        assert!(remove_permanently(&link).is_err());
+        assert!(move_to_trash(&link, TrashBackend::Native).is_err());
+        assert!(keep.exists());
+        assert!(link.exists());
     }
 
     fn target(path: &Path, bytes: u64) -> Target {
