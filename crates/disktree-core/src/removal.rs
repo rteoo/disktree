@@ -662,8 +662,8 @@ mod tests {
     #[test]
     fn windows_system_paths_are_blocked_but_home_contents_are_allowed() {
         let temp = tree();
-        let drive = crate::space::volume_root_for(temp.path())
-            .expect("volume root");
+        let drive =
+            crate::space::volume_root_for(temp.path()).expect("volume root");
         let home = drive.join("Users/example");
         for name in [
             "Windows/System32",
