@@ -222,9 +222,7 @@ pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
     let own = macos_mount_for(root)?;
     let mut foreign: Vec<PathBuf> = mounts
         .iter()
-        .filter(|mount| {
-            mount.point != root && mount.point.starts_with(root)
-        })
+        .filter(|mount| mount.point != root && mount.point.starts_with(root))
         .map(|mount| mount.point.clone())
         .collect();
     if mounts.iter().any(|mount| {
