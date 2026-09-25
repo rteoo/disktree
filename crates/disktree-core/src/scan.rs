@@ -315,6 +315,27 @@ impl WalkContext {
             return self.classify_symlink(&path, name);
         }
 
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            match fs::symlink_metadata(&path) {
+                Ok(meta)
+                    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 =>
+                {
+                    // Junctions can point into another volume or back to an
+                    // ancestor. Show them as links but never descend.
+                    return self.classify_symlink(&path, name);
+                }
+                Err(error) => {
+                    self.progress.record_error(&path, &error);
+                    return Classified::Skipped;
+                }
+                _ => {}
+            }
+        }
+
         if file_type.is_dir() {
             // Memoized: the subtree a narrower scan already measured is
             // taken whole, before any volume rule, since it was measured
@@ -367,7 +388,9 @@ impl WalkContext {
     }
 
     fn classify_symlink(&self, path: &Path, name: Box<str>) -> Classified {
-        if !self.options.follow_links {
+        // ceiling: Windows reparse points are never followed until stable
+        // volume and file identities can bound cross-volume walks and loops.
+        if !self.options.follow_links || cfg!(windows) {
             // Not followed: the link occupies only its target string, which
             // `du` reports as a handful of bytes or nothing at all.
             return match fs::symlink_metadata(path) {
