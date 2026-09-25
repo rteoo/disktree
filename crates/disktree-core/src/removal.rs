@@ -1659,10 +1659,8 @@ mod tests {
         let outer = target(&root.join("a"), 30);
         let separate = target(&root.join("other"), 0);
 
-        let plan = ready_plan(
-            &[inner.clone(), outer.clone(), separate.clone()],
-            root,
-        );
+        let plan =
+            ready_plan(&[inner.clone(), outer.clone(), separate.clone()], root);
         assert_eq!(plan.targets.len(), 2);
         assert!(plan.targets.contains(&outer));
         assert!(plan.targets.contains(&separate));
@@ -1714,10 +1712,8 @@ mod tests {
     #[test]
     fn paths_outside_the_root_are_refused() {
         let temp = tree();
-        let plan = ready_plan(
-            &[target(Path::new("/etc/passwd"), 1)],
-            temp.path(),
-        );
+        let plan =
+            ready_plan(&[target(Path::new("/etc/passwd"), 1)], temp.path());
         assert!(plan.is_empty());
         assert_eq!(plan.blocked[0].reason, "outside the scanned root");
     }
@@ -2240,10 +2236,8 @@ mod tests {
         fs::create_dir(keep.path().join("x")).expect("mkdir");
         fs::write(keep.path().join("x/precious.bin"), b"data").expect("write");
         fs::create_dir(temp.path().join("a/b/x")).expect("mkdir");
-        let plan = ready_plan(
-            &[target(&temp.path().join("a/b/x"), 0)],
-            temp.path(),
-        );
+        let plan =
+            ready_plan(&[target(&temp.path().join("a/b/x"), 0)], temp.path());
         assert_eq!(plan.targets.len(), 1);
         fs::remove_dir_all(temp.path().join("a/b")).expect("clear");
         link_dir(keep.path(), &temp.path().join("a/b"));
