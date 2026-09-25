@@ -193,12 +193,15 @@ fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
 
 #[cfg(windows)]
 fn in_windows_home(path: &Path, home: &Path) -> bool {
+    if let Ok(home) = home.canonicalize() {
+        // A marked path may disappear before review. Resolve its nearest
+        // existing ancestor so the home guard still recognizes its location.
+        return path
+            .ancestors()
+            .find_map(|ancestor| ancestor.canonicalize().ok())
+            .is_some_and(|ancestor| ancestor.starts_with(home));
+    }
     path.starts_with(normalize(home))
-        || path
-            .canonicalize()
-            .ok()
-            .zip(home.canonicalize().ok())
-            .is_some_and(|(path, home)| path.starts_with(home))
 }
 
 #[cfg(windows)]
@@ -744,6 +747,7 @@ mod tests {
         assert!(is_windows_home(&home, &canonical));
         assert!(in_windows_home(&canonical.join("b"), &home));
         assert!(in_windows_home(&home.join("b"), &canonical));
+        assert!(in_windows_home(&canonical.join("absent"), &home));
     }
 
     #[cfg(windows)]

@@ -70,6 +70,9 @@ pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
 /// Read Windows volume totals and free space from the same filesystem.
 #[cfg(windows)]
 pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
+    // GetDiskFreeSpaceExW can report the containing drive even when `path`
+    // itself is gone, so validate the path before showing its volume space.
+    std::fs::metadata(path)?;
     let stat = fs2::statvfs(path)?;
     Ok(SpaceInfo {
         total: stat.total_space(),
