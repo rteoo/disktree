@@ -22,10 +22,10 @@ release is still v0.9.1: it has three archives, each with a `.sha256`
 checksum — Linux x86_64, macOS Apple Silicon, and Windows x86_64. Download
 those from [this fork's releases](https://github.com/rteoo/disktree/releases).
 
-The original project's v0.10.0 release has six architecture
+The original project's v0.10.1 release has six architecture
 archives: Linux x86_64 and aarch64, macOS x86_64 and aarch64 app bundles, and
 Windows x86_64 and aarch64. Those are published in
-[the original project's v0.10.0 release](https://github.com/tobi/disktree/releases/tag/v0.10.0).
+[the original project's v0.10.1 release](https://github.com/tobi/disktree/releases/tag/v0.10.1).
 The fork has not published a v0.10.x release.
 
 ### Linux (Omarchy)
@@ -34,7 +34,7 @@ The fork's v0.9.1 release has an x86_64 Linux archive. Download
 `disktree-*-x86_64-linux.tar.gz` from
 [this fork's releases](https://github.com/rteoo/disktree/releases), unpack
 it, and run `./install.sh` inside (or copy `disktree` onto your `PATH`).
-The original project's v0.10.0 release also has an aarch64 Linux archive.
+The original project's v0.10.1 release also has an aarch64 Linux archive.
 
 To build the current source:
 
@@ -68,10 +68,10 @@ an older Rust; [rustup](https://rustup.rs) installs a current one.
 The fork's v0.9.1 release has an Apple Silicon `.tar.gz` containing the
 binary, README and license; it does not contain an app bundle. Download it
 from [this fork's releases](https://github.com/rteoo/disktree/releases).
-The original project's v0.10.0 release has `.app` bundles for Apple Silicon
+The original project's v0.10.1 release has `.app` bundles for Apple Silicon
 and Intel Macs. Download `disktree-*-aarch64-macos.zip` (`x86_64-macos` for
 an Intel Mac) from
-[its v0.10.0 release](https://github.com/tobi/disktree/releases/tag/v0.10.0),
+[its v0.10.1 release](https://github.com/tobi/disktree/releases/tag/v0.10.1),
 unzip it, and drag `disktree.app` into Applications.
 To build the current source, use Rust 1.97 or newer and Xcode or its Command
 Line Tools. macOS does not come with Rust; install it with
@@ -124,9 +124,9 @@ NOTARY_PROFILE=DeveloperID cargo xtask bundle \
 The fork's v0.9.1 release has an x86_64 Windows ZIP. Download
 `disktree-*-x86_64-windows.zip` from
 [this fork's releases](https://github.com/rteoo/disktree/releases).
-The original project's v0.10.0 release also has x86_64 and aarch64 Windows
+The original project's v0.10.1 release also has x86_64 and aarch64 Windows
 archives at
-[its v0.10.0 release](https://github.com/tobi/disktree/releases/tag/v0.10.0).
+[its v0.10.1 release](https://github.com/tobi/disktree/releases/tag/v0.10.1).
 
 To build the current source on Windows 10 or 11, use Rust 1.97 or newer from
 [rustup](https://rustup.rs) and the MSVC toolchain (Visual Studio Build
