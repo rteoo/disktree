@@ -26,7 +26,7 @@ use std::thread;
 use rayon::Scope;
 use rustc_hash::FxHashSet;
 
-use crate::tree::{Metric, Node, NodeKind, aggregate};
+use crate::tree::{FileKey, Metric, Node, NodeKind, aggregate};
 
 /// Errors kept verbatim before the list is truncated; the count keeps rising.
 const MAX_ERROR_DETAIL: usize = 50;
@@ -253,7 +253,7 @@ struct WalkContext {
     /// when the table cannot be read, and devices are compared instead.
     foreign_mounts: OnceLock<FxHashSet<PathBuf>>,
     /// Directories already entered, so followed symlinks cannot loop.
-    visited_dirs: Mutex<FxHashSet<(u64, u64)>>,
+    visited_dirs: Mutex<FxHashSet<FileKey>>,
     /// Set by the root's `complete`, read after the scope joins.
     root: Mutex<Option<Node>>,
 }
@@ -264,7 +264,9 @@ impl WalkContext {
         if let Some(device) = *cached {
             return Some(device);
         }
-        let device = fs::metadata(path).map(|meta| device_of(&meta)).ok();
+        let device = fs::metadata(path)
+            .and_then(|meta| device_of(path, &meta))
+            .ok();
         *cached = device;
         device
     }
@@ -292,8 +294,50 @@ impl WalkContext {
             return Classified::Skipped;
         }
 
+        #[cfg(windows)]
+        if !self.options.include_hidden {
+            use std::os::windows::fs::MetadataExt as _;
+
+            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+            match fs::symlink_metadata(&path) {
+                Ok(meta)
+                    if meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 =>
+                {
+                    return Classified::Skipped;
+                }
+                Err(error) => {
+                    self.progress.record_error(&path, &error);
+                    return Classified::Skipped;
+                }
+                _ => {}
+            }
+        }
+
         if file_type.is_symlink() {
             return self.classify_symlink(&path, name);
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            match fs::symlink_metadata(&path) {
+                Ok(meta)
+                    if meta.file_attributes()
+                        & FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0 =>
+                {
+                    // Junctions can point into another volume or back to an
+                    // ancestor. Show them as links but never descend.
+                    return self.classify_symlink(&path, name);
+                }
+                Err(error) => {
+                    self.progress.record_error(&path, &error);
+                    return Classified::Skipped;
+                }
+                _ => {}
+            }
         }
 
         if file_type.is_dir() {
@@ -320,7 +364,8 @@ impl WalkContext {
                     return Classified::Skipped;
                 }
             } else if self.options.one_filesystem {
-                let device = entry.metadata().map(|meta| device_of(&meta));
+                let device =
+                    entry.metadata().and_then(|meta| device_of(&path, &meta));
                 match (device, self.root_device(&path)) {
                     (Ok(device), Some(root_device))
                         if device != root_device =>
@@ -339,7 +384,9 @@ impl WalkContext {
         }
 
         match entry.metadata() {
-            Ok(meta) => self.leaf(name, kind_of(&meta, file_type), &meta),
+            Ok(meta) => {
+                self.leaf(&path, name, kind_of(&meta, file_type), &meta)
+            }
             Err(error) => {
                 self.progress.record_error(&path, &error);
                 Classified::Skipped
@@ -348,18 +395,29 @@ impl WalkContext {
     }
 
     fn classify_symlink(&self, path: &Path, name: Box<str>) -> Classified {
-        if !self.options.follow_links {
+        // ceiling: Windows reparse points are never followed until stable
+        // volume and file identities can bound cross-volume walks and loops.
+        if !self.options.follow_links || cfg!(windows) {
             // Not followed: the link occupies only its target string, which
             // `du` reports as a handful of bytes or nothing at all.
             return match fs::symlink_metadata(path) {
                 Ok(meta) => {
-                    let size = measure(&meta, self.options.apparent_size);
+                    #[cfg(unix)]
+                    let size = measure(path, &meta, self.options.apparent_size)
+                        .expect("Unix metadata measurement cannot fail");
+                    #[cfg(windows)]
+                    let size = 0;
                     self.progress.count_file(size);
+                    #[cfg(unix)]
+                    let inode = file_identity(path, &meta).ok();
+                    #[cfg(windows)]
+                    let inode = None;
                     Classified::Entry(leaf_node(
                         name,
                         NodeKind::Symlink,
                         size,
                         &meta,
+                        inode,
                     ))
                 }
                 Err(error) => {
@@ -381,7 +439,7 @@ impl WalkContext {
         };
 
         if meta.is_dir() {
-            if let Some(key) = file_identity(&meta)
+            if let Ok(key) = file_identity(path, &meta)
                 && !lock(&self.visited_dirs).insert(key)
             {
                 return Classified::Skipped;
@@ -390,18 +448,32 @@ impl WalkContext {
             return Classified::Subdirectory(path.to_path_buf());
         }
 
-        self.leaf(name, kind_of(&meta, meta.file_type()), &meta)
+        self.leaf(path, name, kind_of(&meta, meta.file_type()), &meta)
     }
 
     fn leaf(
         &self,
+        path: &Path,
         name: Box<str>,
         kind: NodeKind,
         meta: &Metadata,
     ) -> Classified {
-        let size = measure(meta, self.options.apparent_size);
+        let size = match measure(path, meta, self.options.apparent_size) {
+            Ok(size) => size,
+            Err(error) => {
+                self.progress.record_error(path, &error);
+                return Classified::Skipped;
+            }
+        };
+        let inode = match file_identity(path, meta) {
+            Ok(inode) => Some(inode),
+            Err(error) => {
+                self.progress.record_error(path, &error);
+                return Classified::Skipped;
+            }
+        };
         self.progress.count_file(size);
-        Classified::Entry(leaf_node(name, kind, size, meta))
+        Classified::Entry(leaf_node(name, kind, size, meta, inode))
     }
 }
 
@@ -479,7 +551,7 @@ fn scan_blocking(root: &Path, context: &Arc<WalkContext>) -> io::Result<Node> {
         ));
     }
     if context.options.one_filesystem {
-        *lock(&context.root_device) = Some(device_of(&root_meta));
+        *lock(&context.root_device) = Some(device_of(root, &root_meta)?);
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let foreign = crate::space::foreign_mounts_for(&root);
         #[cfg(target_os = "macos")]
@@ -491,7 +563,7 @@ fn scan_blocking(root: &Path, context: &Arc<WalkContext>) -> io::Result<Node> {
         }
     }
     if context.options.follow_links
-        && let Some(key) = file_identity(&root_meta)
+        && let Ok(key) = file_identity(root, &root_meta)
     {
         lock(&context.visited_dirs).insert(key);
     }
@@ -600,7 +672,7 @@ fn finish_tree(mut node: Node, options: &ScanOptions) -> Node {
     node
 }
 
-fn mark_duplicate_hardlinks(node: &mut Node, seen: &mut FxHashSet<(u64, u64)>) {
+fn mark_duplicate_hardlinks(node: &mut Node, seen: &mut FxHashSet<FileKey>) {
     if !node.is_dir() {
         if node.inode.is_some_and(|key| !seen.insert(key)) {
             node.own_bytes = 0;
@@ -617,9 +689,10 @@ fn leaf_node(
     kind: NodeKind,
     size: u64,
     meta: &Metadata,
+    inode: Option<FileKey>,
 ) -> Node {
     let mut node = Node::entry(name, kind, size);
-    node.inode = file_identity(meta);
+    node.inode = inode;
     node.modified = modified_seconds(meta);
     node
 }
@@ -635,19 +708,34 @@ fn modified_seconds(meta: &Metadata) -> i64 {
         })
 }
 
-fn measure(meta: &Metadata, apparent_size: bool) -> u64 {
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Windows allocated-size lookup can fail; Unix uses metadata"
+)]
+fn measure(
+    path: &Path,
+    meta: &Metadata,
+    apparent_size: bool,
+) -> io::Result<u64> {
     if apparent_size {
-        meta.len()
+        Ok(meta.len())
     } else {
-        allocated_bytes(meta).unwrap_or(meta.len())
+        #[cfg(unix)]
+        {
+            let _ = path;
+            Ok(allocated_bytes(meta).unwrap_or(meta.len()))
+        }
+        #[cfg(windows)]
+        {
+            filesize::file_real_size_fast(path, meta)
+        }
     }
 }
 
 /// Allocated bytes, `st_blocks * 512`: sparse files spend less than they claim,
 /// and this is the number that matches `du`.
 ///
-/// Returns `Option` because only Unix reports allocated blocks; elsewhere the
-/// caller falls back to the apparent length.
+/// Returns `Option` to preserve the Unix measurement path.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "the Option is the non-Unix answer, where the caller falls back"
@@ -658,38 +746,45 @@ fn allocated_bytes(meta: &Metadata) -> Option<u64> {
     Some(meta.blocks().saturating_mul(512))
 }
 
-#[cfg(not(unix))]
-fn allocated_bytes(_meta: &Metadata) -> Option<u64> {
-    None
-}
-
 #[cfg(unix)]
-fn device_of(meta: &Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt as _;
-    meta.dev()
-}
-
-#[cfg(not(unix))]
-fn device_of(_meta: &Metadata) -> u64 {
-    0
-}
-
-/// `(device, inode)`, or `None` where the platform does not expose them.
-/// Hardlink de-duplication and symlink loop detection both depend on this, so
-/// they are simply unavailable rather than silently wrong elsewhere.
 #[allow(
     clippy::unnecessary_wraps,
-    reason = "the Option is the non-Unix answer, so both arms must agree"
+    reason = "Windows volume identity lookup can fail"
 )]
-#[cfg(unix)]
-fn file_identity(meta: &Metadata) -> Option<(u64, u64)> {
+fn device_of(_path: &Path, meta: &Metadata) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt as _;
-    Some((meta.dev(), meta.ino()))
+    Ok(meta.dev())
 }
 
-#[cfg(not(unix))]
-fn file_identity(_meta: &Metadata) -> Option<(u64, u64)> {
-    None
+#[cfg(windows)]
+fn device_of(path: &Path, _meta: &Metadata) -> io::Result<u64> {
+    match file_id::get_file_id(path)? {
+        file_id::FileId::HighRes {
+            volume_serial_number,
+            ..
+        } => Ok(volume_serial_number),
+        file_id::FileId::LowRes {
+            volume_serial_number,
+            ..
+        } => Ok(u64::from(volume_serial_number)),
+        file_id::FileId::Inode { device_id, .. } => Ok(device_id),
+    }
+}
+
+/// Stable identity for hardlink accounting and followed-directory loops.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Windows file identity lookup can fail"
+)]
+#[cfg(unix)]
+fn file_identity(_path: &Path, meta: &Metadata) -> io::Result<FileKey> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path, _meta: &Metadata) -> io::Result<FileKey> {
+    file_id::get_file_id(path)
 }
 
 fn kind_of(meta: &Metadata, file_type: fs::FileType) -> NodeKind {
@@ -727,6 +822,31 @@ mod tests {
     use crate::tree::Metric;
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hidden_attribute_is_skipped_when_requested() {
+        let temp = TempDir::new().expect("tempdir");
+        let hidden = temp.path().join("secret.bin");
+        fs::write(&hidden, b"data").expect("write");
+        let status = std::process::Command::new("attrib")
+            .arg("+H")
+            .arg(&hidden)
+            .status()
+            .expect("attrib");
+        assert!(status.success(), "set hidden attribute");
+
+        let all = scan_dir(temp.path(), &options());
+        assert!(all.child_named("secret.bin").is_some());
+        let visible = scan_dir(
+            temp.path(),
+            &ScanOptions {
+                include_hidden: false,
+                ..options()
+            },
+        );
+        assert!(visible.child_named("secret.bin").is_none());
+    }
 
     /// Apparent sizes, so the assertions are about the tree rather than about
     /// how the filesystem rounds a small file up to a block.
@@ -822,6 +942,19 @@ mod tests {
         assert_eq!(counted.bytes, 8192);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_scan_uses_allocated_size() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = write(temp.path(), "file.bin", 1000);
+        let metadata = fs::metadata(&path).expect("metadata");
+        let expected = filesize::file_real_size_fast(&path, &metadata)
+            .expect("allocated size");
+
+        let tree = scan_dir(temp.path(), &ScanOptions::default());
+        assert_eq!(child(&tree, "file.bin").bytes, expected);
+    }
+
     #[test]
     fn hidden_entries_are_included_by_default_and_excluded_on_request() {
         let temp = TempDir::new().expect("tempdir");
@@ -843,6 +976,7 @@ mod tests {
         assert_eq!(without.bytes, 100);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_are_not_followed_by_default() {
         let temp = TempDir::new().expect("tempdir");
@@ -862,6 +996,7 @@ mod tests {
         assert!(link.bytes < 100, "a link holds only its target string");
     }
 
+    #[cfg(unix)]
     #[test]
     fn followed_symlink_loops_do_not_hang_the_scan() {
         let temp = TempDir::new().expect("tempdir");
@@ -932,6 +1067,7 @@ mod tests {
         assert_eq!(by_files.children[0].files, 5);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_directory_is_recorded_not_fatal() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1045,7 +1181,7 @@ mod tests {
     #[test]
     #[ignore = "walks the whole disk"]
     fn whole_disk_smoke() {
-        let home = std::env::var_os("HOME").map(PathBuf::from).expect("HOME");
+        let home = crate::home_dir().expect("home directory");
         let root = crate::space::volume_root_for(&home).expect("a volume root");
         let started = std::time::Instant::now();
         let tree = scan(&root, ScanOptions::default()).expect("scan");

@@ -414,7 +414,7 @@ impl Disktree {
         depth: u32,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = disktree_core::home_dir();
         let space = space_info(&root_path).ok();
         let trash_backend = detect_trash_backend();
         let mut tree = Self {

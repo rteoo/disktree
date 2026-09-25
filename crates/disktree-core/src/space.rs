@@ -49,6 +49,7 @@ impl SpaceInfo {
 }
 
 /// Read the space on the volume containing `path`.
+#[cfg(unix)]
 pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
     let stat = rustix::fs::statvfs(path)?;
     // `f_frsize` is the fragment size the block counts are expressed in;
@@ -66,14 +67,34 @@ pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
     })
 }
 
+/// Read Windows volume totals and free space from the same filesystem.
+#[cfg(windows)]
+pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
+    // GetDiskFreeSpaceExW can report the containing drive even when `path`
+    // itself is gone, so validate the path before showing its volume space.
+    std::fs::metadata(path)?;
+    let stat = fs2::statvfs(path)?;
+    Ok(SpaceInfo {
+        total: stat.total_space(),
+        free: stat.free_space(),
+        available: stat.available_space(),
+    })
+}
+
 /// The device a path's filesystem is mounted from, such as
 /// `/dev/nvme0n1p2`: the mount with the longest prefix of `path` in
 /// `/proc/self/mounts`. `None` where that table cannot be read.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn device_for(path: &Path) -> Option<String> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     device_in(&table, &path)
+}
+
+/// Show the containing drive or UNC share in the volume meter.
+#[cfg(windows)]
+pub fn device_for(path: &Path) -> Option<String> {
+    volume_root_for(path).map(|root| root.display().to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -192,11 +213,21 @@ pub fn volume_root(mounts: &[Mount], path: &Path) -> Option<PathBuf> {
 }
 
 /// [`volume_root`] for this machine.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     volume_root(&parse_mounts(&table), &path)
+}
+
+/// On Windows the drive root (or UNC share root) is the volume boundary.
+#[cfg(windows)]
+pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
+    path.canonicalize()
+        .ok()?
+        .ancestors()
+        .last()
+        .map(Path::to_path_buf)
 }
 
 /// APFS firmlinks make `/Users` look like it lives under `/` while `df`
@@ -209,10 +240,16 @@ pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
 
 /// [`foreign_mounts`] for this machine; `None` when the mount table cannot
 /// be read, so the caller can fall back to comparing devices.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     Some(foreign_mounts(&parse_mounts(&table), root))
+}
+
+/// Windows scan boundaries are checked from volume identities per entry.
+#[cfg(windows)]
+pub const fn foreign_mounts_for(_root: &Path) -> Option<Vec<PathBuf>> {
+    None
 }
 
 /// macOS does not have `/proc/self/mounts`; parse its native mount table.
@@ -330,6 +367,27 @@ fn parse_macos_mounts(table: &str) -> Vec<Mount> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_volume_root_is_the_drive_or_share_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().canonicalize().expect("canonical path");
+        let root = volume_root_for(&path).expect("volume root");
+        assert!(path.starts_with(&root));
+        assert_eq!(root.parent(), None);
+        assert_eq!(foreign_mounts_for(&root), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_space_comes_from_the_containing_volume() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let space = space_info(temp.path()).expect("volume space");
+        assert!(space.total > 0);
+        assert!(space.free <= space.total);
+        assert!(space.available <= space.free);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

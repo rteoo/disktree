@@ -14,3 +14,9 @@ pub mod size;
 pub mod space;
 pub mod tree;
 pub mod treemap;
+
+/// The current user's home directory from this platform's standard variable.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    let variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(variable).map(std::path::PathBuf::from)
+}

@@ -15,6 +15,12 @@ rayon = { workspace = true }
 rustix = { version = "1.1", features = ["fs"] }
 rustc-hash = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+file-id = "0.2.3"
+filesize = "0.2.0"
+fs2 = "0.4.3"
+trash = "5.2.9"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 trash = "5.2.9"
 
