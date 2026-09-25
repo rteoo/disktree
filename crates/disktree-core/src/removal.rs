@@ -1624,6 +1624,17 @@ mod tests {
         }
     }
 
+    fn ready_plan(targets: &[Target], root: &Path) -> Plan {
+        prime_mount_points();
+        for _ in 0..500 {
+            if mount_points().is_ok() {
+                return plan(targets, root);
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("mount table did not become available for planning");
+    }
+
     /// [`system_tree`] for plain paths, keyed the way [`refuse`] keys them.
     #[cfg(not(windows))]
     fn tree_of(path: &Path, home: &Path) -> Option<&'static str> {
@@ -1648,8 +1659,10 @@ mod tests {
         let outer = target(&root.join("a"), 30);
         let separate = target(&root.join("other"), 0);
 
-        let plan =
-            plan(&[inner.clone(), outer.clone(), separate.clone()], root);
+        let plan = ready_plan(
+            &[inner.clone(), outer.clone(), separate.clone()],
+            root,
+        );
         assert_eq!(plan.targets.len(), 2);
         assert!(plan.targets.contains(&outer));
         assert!(plan.targets.contains(&separate));
@@ -1668,7 +1681,7 @@ mod tests {
             targets.push(target(home, 0));
         }
 
-        let plan = plan(&targets, root);
+        let plan = ready_plan(&targets, root);
         assert!(plan.is_empty());
         assert_eq!(plan.blocked.len(), targets.len());
         assert!(
@@ -1701,7 +1714,10 @@ mod tests {
     #[test]
     fn paths_outside_the_root_are_refused() {
         let temp = tree();
-        let plan = plan(&[target(Path::new("/etc/passwd"), 1)], temp.path());
+        let plan = ready_plan(
+            &[target(Path::new("/etc/passwd"), 1)],
+            temp.path(),
+        );
         assert!(plan.is_empty());
         assert_eq!(plan.blocked[0].reason, "outside the scanned root");
     }
@@ -1711,7 +1727,7 @@ mod tests {
         let temp = tree();
         let root = temp.path();
         fs::create_dir_all(root.join("a-real")).expect("mkdir");
-        let plan = plan(
+        let plan = ready_plan(
             &[target(&root.join("a"), 1), target(&root.join("a-real"), 1)],
             root,
         );
@@ -2073,7 +2089,7 @@ mod tests {
             mounted: true,
         };
 
-        let planned = plan(&[target(&marked, 0)], &root);
+        let planned = ready_plan(&[target(&marked, 0)], &root);
         assert!(planned.is_empty(), "nested mount is blocked in review");
         assert_eq!(planned.blocked.len(), 1);
         let error =
@@ -2203,7 +2219,7 @@ mod tests {
         fs::write(keep.path().join("precious.bin"), b"data").expect("write");
         link_dir(keep.path(), &temp.path().join("link"));
 
-        let plan = plan(
+        let plan = ready_plan(
             &[target(&temp.path().join("link/precious.bin"), 4)],
             temp.path(),
         );
@@ -2224,7 +2240,10 @@ mod tests {
         fs::create_dir(keep.path().join("x")).expect("mkdir");
         fs::write(keep.path().join("x/precious.bin"), b"data").expect("write");
         fs::create_dir(temp.path().join("a/b/x")).expect("mkdir");
-        let plan = plan(&[target(&temp.path().join("a/b/x"), 0)], temp.path());
+        let plan = ready_plan(
+            &[target(&temp.path().join("a/b/x"), 0)],
+            temp.path(),
+        );
         assert_eq!(plan.targets.len(), 1);
         fs::remove_dir_all(temp.path().join("a/b")).expect("clear");
         link_dir(keep.path(), &temp.path().join("a/b"));
@@ -2418,7 +2437,7 @@ mod tests {
     fn a_removal_run_reports_every_item_and_a_total() {
         let temp = tree();
         let root = temp.path();
-        let plan = plan(
+        let plan = ready_plan(
             &[
                 target(&root.join("a/b"), 0),
                 target(&root.join("a/c.bin"), 20),
