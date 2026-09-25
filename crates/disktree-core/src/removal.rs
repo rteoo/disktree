@@ -114,9 +114,9 @@ pub fn plan(targets: &[Target], root: &Path) -> Plan {
                 Ok(mounts) => mount_at_or_below(&path, mounts).map(|mount| {
                     format!("{} is mounted inside the target", mount.display())
                 }),
-                Err(error) => Some(format!(
-                    "cannot inspect mounted filesystems: {error}"
-                )),
+                Err(error) => {
+                    Some(format!("cannot inspect mounted filesystems: {error}"))
+                }
             };
             if let Some(reason) = reason {
                 plan.blocked.push(Blocked {
@@ -174,9 +174,10 @@ fn parse_linux_mounts(table: &[u8]) -> io::Result<Vec<PathBuf>> {
         let mut index = 0;
         while index < field.len() {
             if field[index] == b'\\' {
-                let digits = field
-                    .get(index + 1..index + 4)
-                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+                let digits =
+                    field.get(index + 1..index + 4).ok_or_else(|| {
+                        io::Error::from(io::ErrorKind::InvalidData)
+                    })?;
                 if !digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
                     return Err(io::Error::from(io::ErrorKind::InvalidData));
                 }
@@ -710,8 +711,7 @@ pub fn remove_permanently(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     let (parent, name) = linux_parent(path)?;
     if !meta.is_dir() {
-        return unlinkat(&parent, name, AtFlags::empty())
-            .map_err(Into::into);
+        return unlinkat(&parent, name, AtFlags::empty()).map_err(Into::into);
     }
 
     // A known nested mount blocks the whole target before any marked file is
@@ -1339,8 +1339,9 @@ mod tests {
         )
         .expect("mount table");
         assert_eq!(mounts, vec![PathBuf::from("/tmp/a b\tc\nd\\e")]);
-        assert!(parse_linux_mounts(b"disk /tmp/bad\\999 ext4 rw 0 0\n")
-            .is_err());
+        assert!(
+            parse_linux_mounts(b"disk /tmp/bad\\999 ext4 rw 0 0\n").is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1381,13 +1382,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn mount_ids_distinguish_proc_from_its_parent() {
-        let root = open_linux_dir(rustix::fs::CWD, Path::new("/"))
-            .expect("open root");
-        let proc = open_linux_dir(&root, Path::new("proc"))
-            .expect("open proc");
-        assert!(!LinuxVolume::of(&root)
-            .expect("root mount")
-            .same_as(&LinuxVolume::of(&proc).expect("proc mount")));
+        let root =
+            open_linux_dir(rustix::fs::CWD, Path::new("/")).expect("open root");
+        let proc = open_linux_dir(&root, Path::new("proc")).expect("open proc");
+        assert!(
+            !LinuxVolume::of(&root)
+                .expect("root mount")
+                .same_as(&LinuxVolume::of(&proc).expect("proc mount"))
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1438,7 +1440,10 @@ mod tests {
         let error = remove_permanently(&marked).expect_err("nested mount");
         assert!(error.to_string().contains("mounted filesystem"));
         assert!(keep.exists(), "mounted data was not touched");
-        assert!(marked.join("one.bin").exists(), "preflight blocked all work");
+        assert!(
+            marked.join("one.bin").exists(),
+            "preflight blocked all work"
+        );
         let status = Command::new("umount")
             .arg(&mounted.path)
             .status()
