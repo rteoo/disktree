@@ -221,7 +221,9 @@ pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
     Some(
         macos_mounts()?
             .into_iter()
-            .filter(|mount| mount.point != root && mount.point.starts_with(root))
+            .filter(|mount| {
+                mount.point != root && mount.point.starts_with(root)
+            })
             .map(|mount| mount.point)
             .collect(),
     )
@@ -231,7 +233,12 @@ pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
 /// report the same `st_dev` as their parent.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_mount_points() -> Option<Vec<PathBuf>> {
-    Some(macos_mounts()?.into_iter().map(|mount| mount.point).collect())
+    Some(
+        macos_mounts()?
+            .into_iter()
+            .map(|mount| mount.point)
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -251,7 +258,10 @@ fn macos_mount_for(path: &Path) -> Option<Mount> {
 }
 
 #[cfg(target_os = "macos")]
-fn mount_from_df_line<'a>(mounts: &'a [Mount], line: &str) -> Option<&'a Mount> {
+fn mount_from_df_line<'a>(
+    mounts: &'a [Mount],
+    line: &str,
+) -> Option<&'a Mount> {
     let source = line.split_whitespace().next()?;
     mounts
         .iter()

@@ -153,13 +153,8 @@ const SYSTEM_TREES: [&str; 14] = [
 ];
 
 #[cfg(target_os = "macos")]
-const MACOS_SYSTEM_TREES: [&str; 5] = [
-    "/Applications",
-    "/Library",
-    "/System",
-    "/Users",
-    "/private",
-];
+const MACOS_SYSTEM_TREES: [&str; 5] =
+    ["/Applications", "/Library", "/System", "/Users", "/private"];
 
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
@@ -167,10 +162,9 @@ fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
     // A whole-Data-volume scan reaches the same files through their physical
     // mount path; compare its logical root paths with the normal home path.
     #[cfg(target_os = "macos")]
-    let logical = path.strip_prefix("/System/Volumes/Data").map_or_else(
-        |_| path.to_path_buf(),
-        |rest| Path::new("/").join(rest),
-    );
+    let logical = path
+        .strip_prefix("/System/Volumes/Data")
+        .map_or_else(|_| path.to_path_buf(), |rest| Path::new("/").join(rest));
     #[cfg(target_os = "macos")]
     let path = logical.as_path();
 
@@ -527,7 +521,10 @@ fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn ensure_no_nested_mounts_in(path: &Path, mounts: &[PathBuf]) -> io::Result<()> {
+fn ensure_no_nested_mounts_in(
+    path: &Path,
+    mounts: &[PathBuf],
+) -> io::Result<()> {
     if mounts.iter().any(|point| point == path) || device_boundary(path) {
         return Err(io::Error::other(format!(
             "refusing to remove mounted filesystem {}",
