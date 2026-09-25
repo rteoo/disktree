@@ -2736,11 +2736,21 @@ pub fn hover_tooltip(app: &Disktree, cx: &gpui_kit::App) -> Option<Div> {
 
 fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
     let theme = cx.omarchy();
+    let mark_modifier = if cfg!(target_os = "macos") {
+        "cmd-click"
+    } else {
+        "ctrl-click"
+    };
+    let zoom_modifier = if cfg!(target_os = "macos") {
+        "cmd = / - / 0"
+    } else {
+        "ctrl = / - / 0"
+    };
     // Sentence case, and the tile a key acts on is always the one under the
     // pointer if the pointer moved last, else the keyboard selection.
     let rows: [(&str, &str); 24] = [
         ("space / x", "Mark or unmark the tile you point at"),
-        ("ctrl-click", "Mark without moving the selection"),
+        (mark_modifier, "Mark without moving the selection"),
         ("enter", "Open that directory, at any depth"),
         ("\u{232b} / esc", "Go up one directory"),
         (
@@ -2752,7 +2762,7 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         ("shift-scroll", "Pan the magnified view"),
         ("[ / ]", "Draw fewer or more levels at once"),
         ("- / = / 0", "Magnify, shrink, or reset the view"),
-        ("ctrl = / - / 0", "Interface zoom"),
+        (zoom_modifier, "Interface zoom"),
         (
             "/",
             "Filter by name: only matches keep their colour; enter shows only them",

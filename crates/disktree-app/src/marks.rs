@@ -102,8 +102,25 @@ pub fn find<'a>(
 
 /// A dotfile or dot-directory by name.
 pub fn is_hidden(path: &Path) -> bool {
-    path.file_name()
+    if path
+        .file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+    {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        std::fs::symlink_metadata(path).is_ok_and(|meta| {
+            meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 /// Shorten a path for display: `~` for the home directory, and the path with

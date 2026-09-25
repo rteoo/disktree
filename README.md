@@ -43,6 +43,34 @@ removes exactly what was installed.
 You need Rust 1.97 or newer and a Wayland or X11 session with a GPU that GPUI
 can drive (Vulkan).
 
+### macOS preview
+
+Build the macOS binary with Rust 1.97 or newer:
+
+```sh
+cargo build --release --locked -p disktree-app
+./target/release/disktree
+```
+
+It scans your home directory by default; `--disk` scans its volume. The
+review screen can move marked paths to Finder Trash. Linux installation and
+runtime behavior remain as described above.
+
+### Windows preview
+
+Build the Windows binary with Rust 1.97 or newer:
+
+```powershell
+cargo build --release --locked -p disktree-app
+.\target\release\disktree.exe
+```
+
+It scans your user profile by default; `--disk` scans its drive. File sizes
+use allocated bytes, and marked paths can be moved to the Recycle Bin. Linux
+installation and runtime behavior remain as described above.
+Windows reparse points are excluded from scans; the `--follow-links` and
+`--cross-filesystems` options report that limit if requested.
+
 ## Use
 
 ```sh

@@ -414,7 +414,7 @@ impl Disktree {
         depth: u32,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = disktree_core::home_dir();
         let space = space_info(&root_path).ok();
         let trash_backend = detect_trash_backend();
         let mut tree = Self {
@@ -1962,6 +1962,16 @@ impl Disktree {
         let key = event.keystroke.key.as_str();
         let control = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
+
+        // On macOS the platform modifier is Command. Keep the app's single-key
+        // actions from swallowing native shortcuts such as Command-P.
+        #[cfg(target_os = "macos")]
+        if event.keystroke.modifiers.platform {
+            if key == "q" {
+                cx.quit();
+            }
+            return;
+        }
 
         // The alert dialog owns Enter and Escape while it is open; a key that
         // bubbles up to here must not also act on the screen behind it.

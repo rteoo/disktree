@@ -224,7 +224,8 @@ fn a_permanent_deletion_asks_in_an_alert_dialog_then_removes(
             .expect("the junk directory");
         app.select(Some(junk.clone()), cx);
         app.toggle_mark(&junk, cx);
-        assert_eq!(app.plan().bytes(), 300_000);
+        let plan = app.plan();
+        assert_eq!(plan.bytes(), 300_000, "{:?}", plan.blocked);
     });
 
     press(cx, "c");
@@ -868,7 +869,7 @@ fn finish_scan(view: &Entity<Disktree>, cx: &mut Window) {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ready = update(view, cx, |app, cx| {
             app.poll_scan_once(epoch, cx);
-            app.tree().is_some()
+            app.scan.is_none()
         });
         if ready {
             return;
@@ -943,9 +944,17 @@ fn widening_reuses_the_tree_it_has_and_reads_only_the_rest(
     });
     let before = read(&view, cx, |app| app.tree().map(|tree| tree.files));
 
-    // The trail runs from "/", and the scanned root sits under its parents.
+    // The trail runs from the volume root, and the scanned root sits below it.
     let trail = read(&view, cx, Disktree::breadcrumbs);
-    assert_eq!(trail[0].0, "/");
+    assert_eq!(
+        trail[0].0,
+        temp.path()
+            .ancestors()
+            .last()
+            .expect("volume root")
+            .display()
+            .to_string()
+    );
     assert!(
         trail.contains(&(
             temp.path()

@@ -4,6 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::classify::{Category, Reclaim};
 
+#[cfg(unix)]
+pub type FileKey = (u64, u64);
+
+#[cfg(windows)]
+pub type FileKey = file_id::FileId;
+
 /// What a node represents on disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeKind {
@@ -70,7 +76,7 @@ pub struct Node {
     /// Directories at or beneath this node; `1` for a directory.
     pub dirs: u64,
     /// `(device, inode)` for files, used to de-duplicate hardlinks.
-    pub inode: Option<(u64, u64)>,
+    pub inode: Option<FileKey>,
     /// The directory could not be read; its contents are unknown.
     pub read_error: bool,
     /// Newest write time at or beneath this node, in Unix seconds; `0` when

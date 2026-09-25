@@ -82,9 +82,7 @@ fn main() -> Result<()> {
                                     "disktree · {}",
                                     marks::display_path(
                                         &title_root,
-                                        std::env::var_os("HOME")
-                                            .map(PathBuf::from)
-                                            .as_deref(),
+                                        disktree_core::home_dir().as_deref(),
                                     )
                                 )
                                 .into(),
@@ -134,11 +132,21 @@ fn parse_args() -> Result<Args> {
                 std::process::exit(0);
             }
             "-a" | "--apparent-size" => options.apparent_size = true,
+            #[cfg(windows)]
+            "-l" | "--follow-links" => {
+                anyhow::bail!("--follow-links is unavailable on Windows");
+            }
+            #[cfg(not(windows))]
             "-l" | "--follow-links" => options.follow_links = true,
             "-H" | "--no-hidden" => options.include_hidden = false,
             // Staying on one volume is the default; the flag is kept so
             // old invocations still work.
             "-x" | "--one-filesystem" => options.one_filesystem = true,
+            #[cfg(windows)]
+            "-X" | "--cross-filesystems" => {
+                anyhow::bail!("--cross-filesystems is unavailable on Windows");
+            }
+            #[cfg(not(windows))]
             "-X" | "--cross-filesystems" => options.one_filesystem = false,
             "-D" | "--disk" => disk = true,
             "-d" | "--depth" => {
@@ -173,16 +181,24 @@ fn parse_args() -> Result<Args> {
         !(disk && root.is_some()),
         "--disk and a PATH cannot be combined"
     );
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = disktree_core::home_dir();
     let root = match root {
-        _ if disk => home
-            .as_deref()
-            .and_then(disktree_core::space::volume_root_for)
-            .unwrap_or_else(|| PathBuf::from("/")),
+        _ if disk => {
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                home.as_deref()
+                    .and_then(disktree_core::space::volume_root_for)
+                    .context("cannot determine the home volume")?
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
+            {
+                home.as_deref()
+                    .and_then(disktree_core::space::volume_root_for)
+                    .unwrap_or_else(|| PathBuf::from("/"))
+            }
+        }
         Some(root) => root,
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("no path given and HOME is not set")?,
+        None => home.context("no path given and home is unavailable")?,
     };
     // Store the depth as the initial view setting rather than a scan option: it
     // is a display choice the run-time `[` and `]` keys also change.

@@ -49,6 +49,7 @@ impl SpaceInfo {
 }
 
 /// Read the space on the volume containing `path`.
+#[cfg(unix)]
 pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
     let stat = rustix::fs::statvfs(path)?;
     // `f_frsize` is the fragment size the block counts are expressed in;
@@ -66,13 +67,39 @@ pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
     })
 }
 
+/// Read Windows volume totals and free space from the same filesystem.
+#[cfg(windows)]
+pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
+    // GetDiskFreeSpaceExW can report the containing drive even when `path`
+    // itself is gone, so validate the path before showing its volume space.
+    std::fs::metadata(path)?;
+    let stat = fs2::statvfs(path)?;
+    Ok(SpaceInfo {
+        total: stat.total_space(),
+        free: stat.free_space(),
+        available: stat.available_space(),
+    })
+}
+
 /// The device a path's filesystem is mounted from, such as
 /// `/dev/nvme0n1p2`: the mount with the longest prefix of `path` in
 /// `/proc/self/mounts`. `None` where that table cannot be read.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn device_for(path: &Path) -> Option<String> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     device_in(&table, &path)
+}
+
+/// Show the containing drive or UNC share in the volume meter.
+#[cfg(windows)]
+pub fn device_for(path: &Path) -> Option<String> {
+    volume_root_for(path).map(|root| root.display().to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub fn device_for(path: &Path) -> Option<String> {
+    macos_mount_for(path).map(|mount| mount.source)
 }
 
 /// [`device_for`] over a given mount table, for testing.
@@ -186,22 +213,230 @@ pub fn volume_root(mounts: &[Mount], path: &Path) -> Option<PathBuf> {
 }
 
 /// [`volume_root`] for this machine.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     volume_root(&parse_mounts(&table), &path)
 }
 
+/// On Windows the drive root (or UNC share root) is the volume boundary.
+#[cfg(windows)]
+pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
+    path.canonicalize()
+        .ok()?
+        .ancestors()
+        .last()
+        .map(Path::to_path_buf)
+}
+
+/// APFS firmlinks make `/Users` look like it lives under `/` while `df`
+/// reports its real Data volume at `/System/Volumes/Data`. Device numbers and
+/// path ancestry alone cannot identify the right root.
+#[cfg(target_os = "macos")]
+pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
+    macos_mount_for(path).map(|mount| mount.point)
+}
+
 /// [`foreign_mounts`] for this machine; `None` when the mount table cannot
 /// be read, so the caller can fall back to comparing devices.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     Some(foreign_mounts(&parse_mounts(&table), root))
 }
 
+/// Windows scan boundaries are checked from volume identities per entry.
+#[cfg(windows)]
+pub const fn foreign_mounts_for(_root: &Path) -> Option<Vec<PathBuf>> {
+    None
+}
+
+/// macOS does not have `/proc/self/mounts`; parse its native mount table.
+#[cfg(target_os = "macos")]
+pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
+    let mounts = macos_mounts()?;
+    let own = macos_mount_for(root)?;
+    let mut foreign: Vec<PathBuf> = mounts
+        .iter()
+        .filter(|mount| mount.point != root && mount.point.starts_with(root))
+        .map(|mount| mount.point.clone())
+        .collect();
+    if mounts.iter().any(|mount| {
+        mount.point == Path::new("/System/Volumes/Data")
+            && mount.source != own.source
+    }) {
+        // APFS firmlinks expose Data directories under System paths without
+        // changing st_dev or appearing as mount points at those paths.
+        let table = std::fs::read_to_string("/usr/share/firmlinks").ok()?;
+        foreign.extend(
+            parse_macos_firmlinks(&table)?
+                .into_iter()
+                .filter(|point| point != root && point.starts_with(root)),
+        );
+    }
+    Some(foreign)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_firmlinks(table: &str) -> Option<Vec<PathBuf>> {
+    let mut points = Vec::new();
+    for line in table.lines().filter(|line| !line.is_empty()) {
+        let (source, target) = line.split_once('\t')?;
+        let path = Path::new(source);
+        if !path.is_absolute() || path == Path::new("/") || target.is_empty() {
+            return None;
+        }
+        points.push(path.to_path_buf());
+    }
+    (!points.is_empty()).then_some(points)
+}
+
+/// Mount paths used by the macOS removal guard, including APFS volumes that
+/// report the same `st_dev` as their parent.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_mount_points() -> Option<Vec<PathBuf>> {
+    Some(
+        macos_mounts()?
+            .into_iter()
+            .map(|mount| mount.point)
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mount_for(path: &Path) -> Option<Mount> {
+    let mounts = macos_mounts()?;
+    let output = std::process::Command::new("/bin/df")
+        .arg("-P")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let report = String::from_utf8(output.stdout).ok()?;
+    let line = report.lines().nth(1)?;
+    mount_from_df_line(&mounts, line).cloned()
+}
+
+#[cfg(target_os = "macos")]
+fn mount_from_df_line<'a>(
+    mounts: &'a [Mount],
+    line: &str,
+) -> Option<&'a Mount> {
+    let source = line.split_whitespace().next()?;
+    mounts
+        .iter()
+        .filter(|mount| {
+            mount.source == source
+                && line.trim_end().ends_with(&*mount.point.to_string_lossy())
+        })
+        .max_by_key(|mount| mount.point.as_os_str().len())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mounts() -> Option<Vec<Mount>> {
+    let output = std::process::Command::new("/sbin/mount").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mounts = parse_macos_mounts(&String::from_utf8(output.stdout).ok()?);
+    (!mounts.is_empty()).then_some(mounts)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_mounts(table: &str) -> Vec<Mount> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let (source, rest) = line.rsplit_once(" on ")?;
+            let (point, details) = rest.rsplit_once(" (")?;
+            let options = details.strip_suffix(')')?;
+            let fstype = options.split(',').next()?.to_string();
+            Some(Mount {
+                source: source.to_string(),
+                point: PathBuf::from(point),
+                fstype,
+                options: options.to_string(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_volume_root_is_the_drive_or_share_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().canonicalize().expect("canonical path");
+        let root = volume_root_for(&path).expect("volume root");
+        assert!(path.starts_with(&root));
+        assert_eq!(root.parent(), None);
+        assert_eq!(foreign_mounts_for(&root), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_space_comes_from_the_containing_volume() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let space = space_info(temp.path()).expect("volume space");
+        assert!(space.total > 0);
+        assert!(space.free <= space.total);
+        assert!(space.available <= space.free);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_volume_root_matches_the_reported_mount() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = volume_root_for(temp.path()).expect("volume root");
+        assert!(root.is_absolute());
+        assert!(root.is_dir());
+        assert_eq!(
+            device_for(temp.path()),
+            macos_mount_for(temp.path()).map(|mount| mount.source)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_df_selects_the_data_volume_behind_a_firmlink() {
+        let mounts = parse_macos_mounts(
+            "/dev/disk3s1s1 on / (apfs, sealed, read-only)\n\
+             /dev/disk3s5 on /System/Volumes/Data (apfs, root data)\n",
+        );
+        let line = "/dev/disk3s5 478724992 344216312 72645488 83% /System/Volumes/Data";
+        let mount = mount_from_df_line(&mounts, line).expect("Data mount");
+        assert_eq!(mount.point, Path::new("/System/Volumes/Data"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_firmlinks_identify_data_aliases() {
+        let table = concat!(
+            "/Users\tUsers\n",
+            "/System/Library/Caches\tSystem/Library/Caches\n",
+        );
+        let points = parse_macos_firmlinks(table).expect("firmlinks");
+        assert_eq!(points[0], Path::new("/Users"));
+        assert_eq!(points[1], Path::new("/System/Library/Caches"));
+        assert_eq!(parse_macos_firmlinks("/Users Users\n"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_root_scan_skips_data_firmlinks() {
+        let root = Path::new("/");
+        let data = Path::new("/System/Volumes/Data");
+        if data.is_dir() && device_for(root) != device_for(data) {
+            let foreign = foreign_mounts_for(root).expect("volume boundaries");
+            assert!(foreign.contains(&PathBuf::from("/Users")));
+        }
+    }
 
     const OMARCHY: &str = "\
 sys /sys sysfs rw 0 0
