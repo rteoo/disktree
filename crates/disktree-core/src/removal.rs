@@ -92,7 +92,7 @@ impl Plan {
 /// looking at is the only thing they consented to act on.
 pub fn plan(targets: &[Target], root: &Path) -> Plan {
     let root = normalize(root);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::home_dir();
     let mut plan = Plan::default();
     let mut accepted: Vec<Target> = Vec::new();
 
@@ -135,6 +135,7 @@ pub fn plan(targets: &[Target], root: &Path) -> Plan {
 /// and removing them by hand breaks the system; pacman, paccache and
 /// `journalctl --vacuum` are the right tools. Refused even where
 /// permissions would allow it, and even inside them.
+#[cfg(unix)]
 const SYSTEM_TREES: [&str; 14] = [
     "/bin",
     "/boot",
@@ -154,6 +155,7 @@ const SYSTEM_TREES: [&str; 14] = [
 
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
+#[cfg(unix)]
 fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
     if home.is_some_and(|home| path.starts_with(normalize(home))) {
         return None;
@@ -162,6 +164,31 @@ fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
         .iter()
         .find(|tree| path.starts_with(tree))
         .copied()
+}
+
+/// Refuse Windows-managed directories even when a whole-drive scan sees them.
+#[cfg(windows)]
+fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
+    if home.is_some_and(|home| path.starts_with(normalize(home))) {
+        return None;
+    }
+    let top = path.components().find_map(|component| match component {
+        Component::Normal(name) => Some(name),
+        _ => None,
+    })?;
+    let protected = [
+        "Windows",
+        "Program Files",
+        "Program Files (x86)",
+        "ProgramData",
+        "Recovery",
+        "System Volume Information",
+        "$Recycle.Bin",
+        "Users",
+    ];
+    protected
+        .into_iter()
+        .find(|name| top.to_string_lossy().eq_ignore_ascii_case(name))
 }
 
 fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
@@ -178,6 +205,9 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
         return Some("outside the scanned root".into());
     }
     if let Some(system) = system_tree(path, home) {
+        #[cfg(windows)]
+        return Some(format!("protected Windows directory: {system}"));
+        #[cfg(not(windows))]
         return Some(format!(
             "part of the system under {system}: use the package manager"
         ));
@@ -212,7 +242,19 @@ pub fn is_mount_point(path: &Path) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn is_mount_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    // Junctions and mounted folders are reparse points. Never recurse into
+    // one during removal, even if it currently resolves on the same drive.
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    fs::symlink_metadata(path).is_ok_and(|meta| {
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn is_mount_point(_path: &Path) -> bool {
     false
 }
@@ -444,14 +486,40 @@ fn run(
 pub fn remove_permanently(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
+        #[cfg(windows)]
+        ensure_no_nested_mounts(path)?;
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
     }
 }
 
+/// Detect nested junctions before any deletion begins, so an unmarked volume
+/// cannot be traversed while removing a marked parent.
+#[cfg(windows)]
+fn ensure_no_nested_mounts(path: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if is_mount_point(&child) {
+            return Err(io::Error::other(format!(
+                "refusing to remove reparse point {}",
+                child.display()
+            )));
+        }
+        if fs::symlink_metadata(&child)?.is_dir() {
+            ensure_no_nested_mounts(&child)?;
+        }
+    }
+    Ok(())
+}
+
 /// Move one path to the desktop trash.
 pub fn move_to_trash(path: &Path, backend: TrashBackend) -> io::Result<()> {
+    #[cfg(windows)]
+    if fs::symlink_metadata(path)?.is_dir() {
+        ensure_no_nested_mounts(path)?;
+    }
     match backend {
         TrashBackend::TrashPut => run_tool(Path::new("trash-put"), &[], path),
         TrashBackend::Gio => run_tool(Path::new("gio"), &["trash"], path),
@@ -631,7 +699,7 @@ mod tests {
     fn the_root_and_home_are_refused() {
         let temp = tree();
         let root = temp.path();
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::home_dir();
         let mut targets = vec![target(Path::new("/"), 0), target(root, 0)];
         if let Some(home) = &home {
             targets.push(target(home, 0));

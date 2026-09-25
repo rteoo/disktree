@@ -292,6 +292,25 @@ impl WalkContext {
             return Classified::Skipped;
         }
 
+        #[cfg(windows)]
+        if !self.options.include_hidden {
+            use std::os::windows::fs::MetadataExt as _;
+
+            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+            match fs::symlink_metadata(&path) {
+                Ok(meta)
+                    if meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 =>
+                {
+                    return Classified::Skipped;
+                }
+                Err(error) => {
+                    self.progress.record_error(&path, &error);
+                    return Classified::Skipped;
+                }
+                _ => {}
+            }
+        }
+
         if file_type.is_symlink() {
             return self.classify_symlink(&path, name);
         }
@@ -1040,7 +1059,7 @@ mod tests {
     #[test]
     #[ignore = "walks the whole disk"]
     fn whole_disk_smoke() {
-        let home = std::env::var_os("HOME").map(PathBuf::from).expect("HOME");
+        let home = crate::home_dir().expect("home directory");
         let root = crate::space::volume_root_for(&home).expect("a volume root");
         let started = std::time::Instant::now();
         let tree = scan(&root, ScanOptions::default()).expect("scan");

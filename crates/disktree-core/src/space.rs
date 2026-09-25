@@ -69,10 +69,17 @@ pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
 /// The device a path's filesystem is mounted from, such as
 /// `/dev/nvme0n1p2`: the mount with the longest prefix of `path` in
 /// `/proc/self/mounts`. `None` where that table cannot be read.
+#[cfg(not(windows))]
 pub fn device_for(path: &Path) -> Option<String> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     device_in(&table, &path)
+}
+
+/// Show the containing drive or UNC share in the volume meter.
+#[cfg(windows)]
+pub fn device_for(path: &Path) -> Option<String> {
+    volume_root_for(path).map(|root| root.display().to_string())
 }
 
 /// [`device_for`] over a given mount table, for testing.
@@ -186,22 +193,51 @@ pub fn volume_root(mounts: &[Mount], path: &Path) -> Option<PathBuf> {
 }
 
 /// [`volume_root`] for this machine.
+#[cfg(not(windows))]
 pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     volume_root(&parse_mounts(&table), &path)
 }
 
+/// On Windows the drive root (or UNC share root) is the volume boundary.
+#[cfg(windows)]
+pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
+    path.canonicalize()
+        .ok()?
+        .ancestors()
+        .last()
+        .map(Path::to_path_buf)
+}
+
 /// [`foreign_mounts`] for this machine; `None` when the mount table cannot
 /// be read, so the caller can fall back to comparing devices.
+#[cfg(not(windows))]
 pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
     let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
     Some(foreign_mounts(&parse_mounts(&table), root))
 }
 
+/// Windows scan boundaries are checked from volume identities per entry.
+#[cfg(windows)]
+pub fn foreign_mounts_for(_root: &Path) -> Option<Vec<PathBuf>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_volume_root_is_the_drive_or_share_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().canonicalize().expect("canonical path");
+        let root = volume_root_for(&path).expect("volume root");
+        assert!(path.starts_with(&root));
+        assert_eq!(root.parent(), None);
+        assert_eq!(foreign_mounts_for(&root), None);
+    }
 
     const OMARCHY: &str = "\
 sys /sys sysfs rw 0 0
