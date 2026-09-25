@@ -364,9 +364,8 @@ impl WalkContext {
                     return Classified::Skipped;
                 }
             } else if self.options.one_filesystem {
-                let device = entry
-                    .metadata()
-                    .and_then(|meta| device_of(&path, &meta));
+                let device =
+                    entry.metadata().and_then(|meta| device_of(&path, &meta));
                 match (device, self.root_device(&path)) {
                     (Ok(device), Some(root_device))
                         if device != root_device =>
@@ -708,7 +707,11 @@ fn modified_seconds(meta: &Metadata) -> i64 {
     clippy::unnecessary_wraps,
     reason = "Windows allocated-size lookup can fail; Unix uses metadata"
 )]
-fn measure(path: &Path, meta: &Metadata, apparent_size: bool) -> io::Result<u64> {
+fn measure(
+    path: &Path,
+    meta: &Metadata,
+    apparent_size: bool,
+) -> io::Result<u64> {
     if apparent_size {
         Ok(meta.len())
     } else {

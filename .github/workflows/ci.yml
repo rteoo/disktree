@@ -57,15 +57,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Resolve approved native dependencies
-        run: cargo metadata --format-version 1 > $null
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-lockfile
-          path: Cargo.lock
-          retention-days: 1
-
       - name: Lint
         run: cargo xtask lint
 
