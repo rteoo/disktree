@@ -153,12 +153,8 @@ const SYSTEM_TREES: [&str; 14] = [
 ];
 
 #[cfg(target_os = "macos")]
-const MACOS_SYSTEM_TREES: [&str; 4] = [
-    "/Applications",
-    "/Library",
-    "/System",
-    "/private",
-];
+const MACOS_SYSTEM_TREES: [&str; 4] =
+    ["/Applications", "/Library", "/System", "/private"];
 
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
