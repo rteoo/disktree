@@ -169,7 +169,7 @@ fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
 /// Refuse Windows-managed directories even when a whole-drive scan sees them.
 #[cfg(windows)]
 fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
-    if home.is_some_and(|home| path.starts_with(normalize(home))) {
+    if home.is_some_and(|home| in_windows_home(path, home)) {
         return None;
     }
     let top = path.components().find_map(|component| match component {
@@ -191,6 +191,20 @@ fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
         .find(|name| top.to_string_lossy().eq_ignore_ascii_case(name))
 }
 
+#[cfg(windows)]
+fn in_windows_home(path: &Path, home: &Path) -> bool {
+    path.starts_with(normalize(home))
+        || home
+            .canonicalize()
+            .is_ok_and(|canonical| path.starts_with(canonical))
+}
+
+#[cfg(windows)]
+fn is_windows_home(path: &Path, home: &Path) -> bool {
+    path == normalize(home)
+        || home.canonicalize().is_ok_and(|canonical| path == canonical)
+}
+
 fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
     if path.parent().is_none() {
         return Some("the filesystem root cannot be removed".into());
@@ -198,7 +212,11 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
     if path == root {
         return Some("the scanned root cannot be removed".into());
     }
-    if home.is_some_and(|home| path == normalize(home)) {
+    #[cfg(windows)]
+    let is_home = home.is_some_and(|home| is_windows_home(path, home));
+    #[cfg(not(windows))]
+    let is_home = home.is_some_and(|home| path == normalize(home));
+    if is_home {
         return Some("the home directory cannot be removed".into());
     }
     if !path.starts_with(root) {
@@ -684,6 +702,16 @@ mod tests {
         }
         assert_eq!(system_tree(&home.join("Downloads"), Some(&home)), None);
         assert_eq!(detect_trash_backend(), TrashBackend::Unavailable);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_home_guard_accepts_canonical_drive_paths() {
+        let temp = tree();
+        let home = temp.path().join("a");
+        let canonical = home.canonicalize().expect("canonical home");
+        assert!(is_windows_home(&canonical, &home));
+        assert!(in_windows_home(&canonical.join("b"), &home));
     }
 
     fn target(path: &Path, bytes: u64) -> Target {
