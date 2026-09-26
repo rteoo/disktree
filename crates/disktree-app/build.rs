@@ -17,9 +17,8 @@ fn main() {
 
     // Cargo can run outside a Visual Studio prompt, where the SDK bin is not
     // on PATH even though the MSVC linker and Windows SDK are installed.
-    let rc_exe = env::var_os("DISKTREE_RC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    let rc_exe = env::var_os("DISKTREE_RC").map_or_else(
+        || {
             let sdk_bin = env::var_os("WindowsSdkDir")
                 .map(PathBuf::from)
                 .or_else(|| {
@@ -44,7 +43,9 @@ fn main() {
             versions
                 .pop()
                 .expect("rc.exe is missing from the Windows SDK")
-        });
+        },
+        PathBuf::from,
+    );
     let status = Command::new(rc_exe)
         .arg("/nologo")
         .arg(format!("/fo{}", res.display()))
