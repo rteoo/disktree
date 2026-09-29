@@ -1,7 +1,12 @@
 # disktree — agent guide
 
-A GPUI + gpui-omarchy treemap explorer for disk usage on Omarchy. Read
-`README.md` for the product; this file is the working contract.
+Follow the active runtime's global `AGENTS.md` and `SOUL.md`. This file adds
+project-specific facts and commands; it cannot weaken global approval or
+privacy rules.
+
+A GPUI-based disk-usage treemap with Linux, macOS, and Windows code paths.
+Omarchy is its original Linux target. Read `README.md` for the product; this
+file is the working contract.
 
 ## What this is
 
@@ -58,6 +63,10 @@ and `cargo build --release` directly; CI runs the gate on both systems.
   press keys — so a screen that panics while painting fails a test.
 * **Never delete anything outside a marked path.** See `removal.rs`; the guards
   are load-bearing and are covered by tests.
+
+This repository is public. Before committing or pushing, inspect the exact
+staged files, outgoing commits, author and committer identities, and any binary
+contents or metadata for private data. Do not publish local scan results.
 
 ## Invariants
 
