@@ -1047,7 +1047,8 @@ fn finish_scan(view: &Entity<Disktree>, cx: &mut Window) {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ready = update(view, cx, |app, cx| {
             app.poll_scan_once(epoch, cx);
-            app.tree().is_some()
+            // Widening keeps the previous tree visible until the scan lands.
+            app.scan.is_none() && app.tree().is_some()
         });
         if ready {
             return;

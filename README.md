@@ -404,6 +404,11 @@ every size is on one `rem` scale so interface zoom keeps its proportions,
 primary is reserved for what Enter does, and the only question the app asks is
 the one it cannot take back.
 
+## Windows release preparation
+
+See [RELEASE-WINDOWS.md](RELEASE-WINDOWS.md) for the Windows dry run, locked
+artifact preparation, hash verification, and cross-platform release gates.
+
 ## License
 
 MIT
